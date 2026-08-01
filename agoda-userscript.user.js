@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.2.0
-// @description  아고다 최저가 도우미 — 2인 유효 최저가 자동 선택, 최저가 1클릭 예약, 세금포함 총액 표시, 쿠폰 자동시도, 가격 변동 감지
+// @version      1.3.0
+// @description  전 세계 아고다 숙소 최저가 도우미 — 2인 유효 최저가 자동 선택(다국어), 1클릭 예약, 세금포함 총액, 쿠폰 자동시도, 가격 변동 감지
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
@@ -64,6 +64,30 @@
     promoInput: 'input[placeholder*="promo" i], input[placeholder*="coupon" i], input[placeholder*="쿠폰" i], input[placeholder*="코드" i], input[id*="promo" i], input[name*="promo" i], [data-selenium*="promo" i] input, [data-selenium*="Promo" i] input, [data-selenium*="Coupon" i] input'
   };
 
+  const OCC_1ADULT_RE = /성인\s*1\s*명|1\s*adult|大人\s*1\s*名|1名|1人|for\s*1\s*person|1인\s*기준|\(1인|1인\s*(?:기준|이용)|1\s*person\b/i;
+  const OCC_EXCEEDED_RE = /인원\s*초과|인원.{0,6}(불가|제한)|초과.{0,4}(불가|제한)|선택\s*불가|매진|exceed|maximum\s*(?:occupancy|guest)|max\s*guest|定員|超過|満室|sold\s*out/i;
+  const PER_NIGHT_RE = /1박당\s*요금|per\s*night|1泊(?:あたり)?/i;
+  const TOTAL_RE = /(?:총액|total)|(?:\d+\s*(?:nights?|박|泊))/i;
+
+  function nightsFromUrl() {
+    const m = location.search.match(/[?&]los=(\d+)/);
+    return m ? parseInt(m[1], 10) || 1 : 1;
+  }
+
+  function localeCode() {
+    const m = location.pathname.match(/^\/([a-z]{2})-([a-z]{2})\//);
+    return m ? m[1] : 'ko';
+  }
+
+  function taxFactorForLocale() {
+    const map = {
+      ja: 1.265, ko: 1.1, th: 1.177, in: 1.18, id: 1.11, ph: 1.12, vn: 1.15,
+      my: 1.06, sg: 1.097, tw: 1.05, hk: 1.0, cn: 1.0, us: 1.0, gb: 1.2,
+      de: 1.19, fr: 1.2, es: 1.21, it: 1.22, au: 1.1, nz: 1.15, ca: 1.13
+    };
+    return map[localeCode()] || 1.1;
+  }
+
   function isVisible(el) {
     if (!el || el.closest('script,style,head,noscript')) return false;
     const r = el.getBoundingClientRect();
@@ -94,13 +118,13 @@
       const cell = pd.closest(SEL.offerCell);
       if (!cell || seen.has(cell)) continue;
       const cellText = (cell.innerText || '').replace(/\s+/g, ' ');
-      if (/인원\s*초과|인원.{0,6}(불가|제한)|선택\s*불가|매진|성인\s*1\s*명/.test(cellText)) continue;
+      if (OCC_1ADULT_RE.test(cellText) || OCC_EXCEEDED_RE.test(cellText)) continue;
       const room = cell.closest(SEL.masterRoom);
       const roomNameEl = room ? room.querySelector('[data-selenium="masterroom-title-name"], [data-selenium="MasterRoom-headerTitle"]') : null;
       const roomName = roomNameEl ? roomNameEl.textContent.trim() : '';
-      if (/\(1인|1명\s*기준|1인\s*(?:기준|이용)/.test(roomName)) continue;
-      const perNightTaxM = cellText.match(/1박당\s*요금\s*([\d][\d,.]*)/);
-      const totalM = cellText.match(/(?:2박|총액)[^\d]*([\d][\d,.]*)/);
+      if (OCC_1ADULT_RE.test(roomName)) continue;
+      const perNightTaxM = cellText.match(new RegExp('(?:' + PER_NIGHT_RE.source + ')\\s*[^\\d]*([\\d][\\d,.]*)', 'i'));
+      const totalM = cellText.match(new RegExp('(?:' + TOTAL_RE.source + ')[^\\d]*([\\d][\\d,.]*)', 'i'));
       found.push({
         cell, el: pd, price, text, roomName,
         perNightTax: perNightTaxM ? parseFloat(perNightTaxM[1].replace(/,/g, '')) : null,
@@ -431,11 +455,13 @@
       html += ` <span style="color:#dc2626">⚠ 현지통화 ${hotelCur} 아님 → 5% 수수료 위험</span>`;
     }
     if (min !== null && minP) {
+      const nights = nightsFromUrl();
       html += `<br>최저(1박, 세전): <b>${formatNum(min)}</b> ${minP.roomName ? '· ' + minP.roomName.slice(0, 26) : ''}`;
-      const taxTotal = minP.explicitTotal !== null
-        ? minP.explicitTotal
-        : Math.round(min * 2 * (settings.taxFactor || 1.265));
-      html += `<br>2박 세금포함: <b style="color:#22c55e">≈ ${formatNum(taxTotal)}</b>`;
+      let taxTotal = null;
+      if (minP.explicitTotal !== null) taxTotal = minP.explicitTotal;
+      else if (minP.perNightTax !== null) taxTotal = minP.perNightTax * nights;
+      else taxTotal = Math.round(min * nights * (settings.taxFactor || taxFactorForLocale()));
+      html += `<br>${nights}박 세금포함: <b style="color:#22c55e">≈ ${formatNum(taxTotal)}</b>`;
     } else {
       html += `<br>현재 최저(1박): <b>—</b>`;
     }

@@ -1,0 +1,468 @@
+// ==UserScript==
+// @name         Agoda Always Lowest Price (아고다 최저가 도우미)
+// @namespace    nyx.agoda.lowest
+// @version      1.2.0
+// @description  아고다 최저가 도우미 — 2인 유효 최저가 자동 선택, 최저가 1클릭 예약, 세금포함 총액 표시, 쿠폰 자동시도, 가격 변동 감지
+// @author       Nyx
+// @match        https://www.agoda.com/*
+// @match        https://agoda.com/*
+// @run-at       document-idle
+// @noframes
+// @grant        none
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  const NAME = 'AGODA_MIN_PRICE';
+  const store = {
+    get(key, def) {
+      try {
+        const raw = localStorage.getItem(NAME + ':' + key);
+        return raw ? JSON.parse(raw) : def;
+      } catch (e) { return def; }
+    },
+    set(key, val) {
+      try { localStorage.setItem(NAME + ':' + key, JSON.stringify(val)); } catch (e) {}
+    }
+  };
+
+  const DEFAULTS = {
+    highlight: true,
+    autoSelect: true,
+    promoHunt: true,
+    currencyAuto: true,
+    watchPrice: true,
+    taxFactor: 1.265,
+    promoList: [
+      'OAWAGODA', 'OAWACTIVITY', 'AWESAMAGODA', 'AGODA2026', 'NEWUSER8',
+      'JPKR88', 'JOSHDELACRUZ', 'ROLDAGODA', 'THELUDOVICES', 'ENZOAGODA',
+      'JOSHAGODA', 'ROLDFAGODA', 'HELLOAGODA5', 'AGODADEAL8', 'AGODAENZO',
+      'AL5', 'ACTFORYOU', 'SORALAGODA', 'INATOTRAVEL', 'SINGTEL6OFF',
+      'TEAMLUDOVICE', 'HELLOCAMZ'
+    ],
+    favoriteCurrencies: ['KRW', 'JPY', 'USD', 'EUR', 'THB', 'IDR', 'VND', 'PHP', 'MYR', 'SGD']
+  };
+  const settings = Object.assign({}, DEFAULTS, store.get('settings', {}));
+  const saveSettings = () => store.set('settings', settings);
+
+  const CURRENCY_SYMBOLS = {
+    'US$': 'USD', 'S$': 'SGD', 'HK$': 'HKD', 'A$': 'AUD', 'C$': 'CAD',
+    'NZ$': 'NZD', 'CN¥': 'CNY', 'R$': 'BRL', 'RM': 'MYR', 'Rp': 'IDR',
+    '$': 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY', '₩': 'KRW', '￦': 'KRW',
+    '฿': 'THB', '₹': 'INR', '₫': 'VND', '₱': 'PHP', '₺': 'TRY',
+    '₴': 'UAH', 'zł': 'PLN', 'CHF': 'CHF'
+  };
+  const PRICE_RE = /(?:US\$|S\$|HK\$|A\$|C\$|NZ\$|CN¥|R\$|RM|Rp|zł|CHF|\$|€|£|¥|₩|￦|฿|₹|₫|₱|₺|₴)\s?([\d][\d,.]*)/;
+
+  const SEL = {
+    offerCell: '[data-selenium="ChildRoomsList-roomCell"]',
+    priceDisplay: '[data-selenium="PriceDisplay"]',
+    bookButton: '[data-selenium="ChildRoomsList-bookButtonInput"]',
+    masterRoom: '[data-selenium="MasterRoom"]',
+    roomGrid: '[data-selenium="roomgrid-container"], [data-selenium="RoomGridFilter-container"]',
+    promoInput: 'input[placeholder*="promo" i], input[placeholder*="coupon" i], input[placeholder*="쿠폰" i], input[placeholder*="코드" i], input[id*="promo" i], input[name*="promo" i], [data-selenium*="promo" i] input, [data-selenium*="Promo" i] input, [data-selenium*="Coupon" i] input'
+  };
+
+  function isVisible(el) {
+    if (!el || el.closest('script,style,head,noscript')) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+
+  function parsePrice(text) {
+    const m = text.match(PRICE_RE);
+    if (!m) return null;
+    const num = parseFloat(m[1].replace(/,/g, ''));
+    if (isNaN(num) || num <= 0 || num > 1000000000) return null;
+    const symbol = m[0].replace(/[\d.,\s]/g, '');
+    return { value: num, raw: m[0], currency: CURRENCY_SYMBOLS[symbol] || '?' };
+  }
+
+  function collectPrices(root) {
+    const found = [];
+    const seen = new Set();
+    let pds = [];
+    try { pds = [...root.querySelectorAll(SEL.priceDisplay)]; } catch (e) {}
+    if (pds.length === 0) return found;
+
+    for (const pd of pds) {
+      if (!isVisible(pd)) continue;
+      const text = (pd.textContent || '').trim();
+      const price = parsePrice(text);
+      if (!price) continue;
+      const cell = pd.closest(SEL.offerCell);
+      if (!cell || seen.has(cell)) continue;
+      const cellText = (cell.innerText || '').replace(/\s+/g, ' ');
+      if (/인원\s*초과|인원.{0,6}(불가|제한)|선택\s*불가|매진|성인\s*1\s*명/.test(cellText)) continue;
+      const room = cell.closest(SEL.masterRoom);
+      const roomNameEl = room ? room.querySelector('[data-selenium="masterroom-title-name"], [data-selenium="MasterRoom-headerTitle"]') : null;
+      const roomName = roomNameEl ? roomNameEl.textContent.trim() : '';
+      if (/\(1인|1명\s*기준|1인\s*(?:기준|이용)/.test(roomName)) continue;
+      const perNightTaxM = cellText.match(/1박당\s*요금\s*([\d][\d,.]*)/);
+      const totalM = cellText.match(/(?:2박|총액)[^\d]*([\d][\d,.]*)/);
+      found.push({
+        cell, el: pd, price, text, roomName,
+        perNightTax: perNightTaxM ? parseFloat(perNightTaxM[1].replace(/,/g, '')) : null,
+        explicitTotal: totalM ? parseFloat(totalM[1].replace(/,/g, '')) : null
+      });
+    }
+    return found;
+  }
+
+  function highlightLowest(prices) {
+    document.querySelectorAll('.nyx-agoda-lowest-badge').forEach(b => b.remove());
+    document.querySelectorAll('.nyx-agoda-lowest-outline').forEach(el => el.classList.remove('nyx-agoda-lowest-outline'));
+    if (prices.length === 0) return;
+    const min = Math.min(...prices.map(p => p.price.value));
+    prices.forEach(p => {
+      if (p.price.value !== min) return;
+      p.cell.classList.add('nyx-agoda-lowest-outline');
+      p.cell.style.outline = '2px solid #22c55e';
+      p.cell.style.outlineOffset = '2px';
+      p.cell.style.borderRadius = '8px';
+      const badge = document.createElement('div');
+      badge.className = 'nyx-agoda-lowest-badge';
+      badge.textContent = '⬇ 최저가';
+      Object.assign(badge.style, {
+        position: 'absolute', top: '8px', right: '8px', zIndex: '9999',
+        background: '#22c55e', color: '#fff', padding: '3px 10px',
+        borderRadius: '999px', fontSize: '12px', fontWeight: '700',
+        boxShadow: '0 2px 8px rgba(34,197,94,.5)', pointerEvents: 'none'
+      });
+      if (getComputedStyle(p.cell).position === 'static') p.cell.style.position = 'relative';
+      p.cell.appendChild(badge);
+    });
+  }
+
+  function autoSelectLowest(prices) {
+    if (prices.length < 2) return;
+    const isPropertyPage = /\/hotel\/|\/property\//.test(location.pathname);
+    if (!isPropertyPage) return;
+    const min = Math.min(...prices.map(p => p.price.value));
+    const target = prices.find(p => p.price.value === min);
+    if (!target) return;
+    const btn = target.cell.querySelector(SEL.bookButton);
+    if (btn && isVisible(btn) && btn.disabled !== true) {
+      try { target.cell.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
+      setTimeout(() => btn.click(), 400);
+      notify(`최저가 방 선택됨: ${target.price.raw} ${target.roomName}`);
+    }
+  }
+
+  function bookLowestNow(prices) {
+    if (prices.length === 0) { notify('최저가 셀을 못 찾았어 — 페이지 다시 스캔 중'); scan(); return; }
+    const min = Math.min(...prices.map(p => p.price.value));
+    const target = prices.find(p => p.price.value === min);
+    if (!target) { notify('최저가 셀 없음'); return; }
+    const btn = target.cell.querySelector(SEL.bookButton) || target.cell.querySelector('button, a[href*="book"], [role="button"]');
+    if (btn) {
+      try { target.cell.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
+      setTimeout(() => btn.click(), 400);
+      notify(`🎯 최저가 예약 진행: ${target.price.raw} (1박) — ${target.roomName}`);
+    } else {
+      notify('예약 버튼을 못 찾았어 — 직접 클릭해줘');
+    }
+  }
+
+  function setNativeValue(el, value) {
+    const proto = Object.getPrototypeOf(el);
+    const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+    if (desc && desc.set) desc.set.call(el, value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  async function tryPromoCode(code) {
+    const input = findPromoInput();
+    if (!input) return { code, ok: false, reason: 'no-input' };
+    const applyBtn = findApplyButton();
+    setNativeValue(input, code);
+    await sleep(400);
+    if (applyBtn) applyBtn.click();
+    else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+    await sleep(3000);
+    const discountText = readDiscount();
+    return { code, ok: discountText !== null, reason: discountText !== null ? discountText : 'no-discount' };
+  }
+
+  function findPromoInput() {
+    try {
+      const el = document.querySelector(SEL.promoInput);
+      if (el && isVisible(el)) return el;
+    } catch (e) {}
+    return null;
+  }
+
+  function findApplyButton() {
+    const btns = document.querySelectorAll('button, [role="button"], a.btn');
+    for (const b of btns) {
+      if (!isVisible(b)) continue;
+      const t = (b.textContent || '').trim().toLowerCase();
+      if (/^apply|적용|使用|redeem/.test(t) && t.length < 12) return b;
+    }
+    return null;
+  }
+
+  function readDiscount() {
+    const candidates = document.querySelectorAll('[class*="discount" i], [class*="promo" i], [class*="coupon" i], [data-selenium*="discount" i]');
+    for (const c of candidates) {
+      if (!isVisible(c)) continue;
+      const t = (c.textContent || '').trim();
+      if (PRICE_RE.test(t) && /discount|할인|saved|savings|-|−/i.test(t) && t.length < 200) {
+        return t.replace(/\s+/g, ' ').slice(0, 120);
+      }
+    }
+    return null;
+  }
+
+  async function promoHunt() {
+    const codes = settings.promoList.filter(Boolean);
+    if (codes.length === 0 || findPromoInput() === null) {
+      notify('결제/예약 페이지에서만 쿠폰 시도 가능해');
+      return;
+    }
+    const results = [];
+    for (const code of codes) {
+      const r = await tryPromoCode(code);
+      results.push(r);
+      if (r.ok) notify(`쿠폰 유효: ${code} → ${r.reason}`);
+    }
+    const valid = results.filter(r => r.ok);
+    notify(`쿠폰 검색 완료 — ${valid.length}개 유효`);
+    if (valid.length > 0) {
+      const best = valid[valid.length - 1];
+      await tryPromoCode(best.code);
+      notify(`최종 적용: ${best.code}`);
+    }
+  }
+
+  function currentCurrencyFromUrl() {
+    const m = location.search.match(/[?&]curr=([A-Z]{3})/i);
+    return m ? m[1].toUpperCase() : null;
+  }
+
+  function switchCurrency(code) {
+    const url = new URL(location.href);
+    url.searchParams.set('curr', code);
+    location.href = url.toString();
+  }
+
+  const CC_MAP = { 'th': 'THB', 'jp': 'JPY', 'id': 'IDR', 'vn': 'VND', 'kr': 'KRW',
+    'my': 'MYR', 'sg': 'SGD', 'ph': 'PHP', 'tw': 'TWD', 'cn': 'CNY', 'hk': 'HKD',
+    'in': 'INR', 'ae': 'AED', 'us': 'USD', 'gb': 'GBP', 'de': 'EUR', 'fr': 'EUR',
+    'es': 'EUR', 'it': 'EUR', 'au': 'AUD', 'nz': 'NZD', 'ca': 'CAD', 'ch': 'CHF' };
+
+  function suggestHotelCurrency() {
+    const m = location.pathname.match(/\/([a-z]{2})-([a-z]{2})\//) || location.pathname.match(/\.([a-z]{2})\.html/);
+    if (!m) return null;
+    const cc = m[1] || m[2];
+    return CC_MAP[cc] || null;
+  }
+
+  function priceHistoryKey() {
+    const m = location.pathname.match(/^\/(?:[a-z]{2}-[a-z]{2}\/)?([^/]+)\/hotel\//) || location.pathname.match(/^\/(?:[a-z]{2}-[a-z]{2}\/)?([^/]+)\/property\//);
+    return m ? m[1] : location.pathname.split('/').filter(Boolean).pop() || 'home';
+  }
+
+  function recordPrice(minVal) {
+    if (!settings.watchPrice) return;
+    const key = priceHistoryKey();
+    const h = store.get('history:' + key, { min: null, max: null, seen: 0, last: null });
+    const now = Date.now();
+    if (h.min === null || minVal < h.min) {
+      const drop = h.min !== null && minVal < h.min;
+      h.min = minVal;
+      if (drop) notify(`가격 하락 감지! 최저: ${formatNum(minVal)}`);
+      h.updatedAt = now;
+    }
+    if (h.max === null || minVal > h.max) h.max = minVal;
+    h.seen++;
+    h.last = minVal;
+    store.set('history:' + key, h);
+    return h;
+  }
+
+  function formatNum(n) {
+    return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  }
+
+  let scanTimer = null;
+  function scheduleScan() {
+    if (scanTimer) return;
+    scanTimer = setTimeout(() => {
+      scanTimer = null;
+      scan();
+    }, 600);
+  }
+
+  let lastScan = null;
+  function scan() {
+    if (!settings.highlight && !settings.autoSelect && !settings.watchPrice) return;
+    const prices = collectPrices(document);
+    if (prices.length === 0) return;
+    if (settings.highlight) highlightLowest(prices);
+    if (settings.autoSelect) autoSelectLowest(prices);
+    if (settings.watchPrice) recordPrice(Math.min(...prices.map(p => p.price.value)));
+    const sig = prices.map(p => p.price.value).join('|');
+    if (sig !== lastScan) {
+      lastScan = sig;
+      updatePanel(prices);
+    }
+  }
+
+  function buildPanel() {
+    const panel = document.createElement('div');
+    panel.id = 'nyx-agoda-panel';
+    panel.innerHTML = `
+      <div id="nyx-agoda-panel-head">
+        <span>🏷 아고다 최저가</span>
+        <button id="nyx-agoda-collapse" title="접기">—</button>
+      </div>
+      <div id="nyx-agoda-panel-body">
+        <div id="nyx-agoda-info">로딩 중...</div>
+        <div id="nyx-agoda-controls">
+          <label><input type="checkbox" id="nyx-agoda-cfg-highlight" ${settings.highlight ? 'checked' : ''}> 최저가 하이라이트</label>
+          <label><input type="checkbox" id="nyx-agoda-cfg-autoselect" ${settings.autoSelect ? 'checked' : ''}> 최저가 방 자동선택</label>
+          <label><input type="checkbox" id="nyx-agoda-cfg-promo" ${settings.promoHunt ? 'checked' : ''}> 쿠폰 자동시도</label>
+          <label><input type="checkbox" id="nyx-agoda-cfg-watch" ${settings.watchPrice ? 'checked' : ''}> 가격변동 감지</label>
+        </div>
+        <div id="nyx-agoda-currency">
+          <select id="nyx-agoda-curr-sel">
+            <option value="">통화 선택...</option>
+            ${settings.favoriteCurrencies.map(c => `<option value="${c}">${c}</option>`).join('')}
+          </select>
+          <button id="nyx-agoda-curr-hotel" title="호텔 현지통화로 전환 (5% 수수료 방지)">🏨 현지통화</button>
+        </div>
+        <div id="nyx-agoda-actions">
+          <button id="nyx-agoda-book-now">🎯 최저가 바로 예약</button>
+          <button id="nyx-agoda-promo-run">🎟 쿠폰 지금 시도</button>
+          <button id="nyx-agoda-promo-edit">쿠폰 목록 편집</button>
+        </div>
+        <textarea id="nyx-agoda-promo-list" style="display:none" rows="4" placeholder="쿠폰 코드 한 줄에 하나"></textarea>
+        <div id="nyx-agoda-log"></div>
+      </div>`;
+    Object.assign(panel.style, {
+      position: 'fixed', top: '80px', right: '16px', zIndex: '99999',
+      width: '280px', background: '#fff', border: '1px solid #e2e8f0',
+      borderRadius: '12px', boxShadow: '0 8px 30px rgba(0,0,0,.18)',
+      fontFamily: 'system-ui, sans-serif', fontSize: '13px', color: '#0f172a'
+    });
+    panel.querySelector('#nyx-agoda-panel-head').style.cssText =
+      'display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:#0f172a;color:#fff;border-radius:12px 12px 0 0;font-weight:700;cursor:move';
+    panel.querySelector('#nyx-agoda-panel-body').style.cssText = 'padding:12px;display:block';
+    panel.querySelectorAll('label').forEach(l => l.style.cssText = 'display:block;margin:4px 0;cursor:pointer');
+    panel.querySelectorAll('button').forEach(b => b.style.cssText =
+      'margin:4px 4px 4px 0;padding:6px 10px;background:#0f172a;color:#fff;border:0;border-radius:8px;cursor:pointer;font-size:12px');
+    panel.querySelector('#nyx-agoda-curr-sel').style.cssText = 'padding:5px;border-radius:6px;border:1px solid #cbd5e1';
+    panel.querySelector('#nyx-agoda-log').style.cssText = 'margin-top:8px;max-height:120px;overflow-y:auto;font-size:11px;color:#64748b;white-space:pre-wrap';
+    document.body.appendChild(panel);
+
+    panel.querySelector('#nyx-agoda-collapse').addEventListener('click', () => {
+      const body = panel.querySelector('#nyx-agoda-panel-body');
+      body.style.display = body.style.display === 'none' ? 'block' : 'none';
+    });
+
+    panel.querySelector('#nyx-agoda-cfg-highlight').addEventListener('change', e => {
+      settings.highlight = e.target.checked; saveSettings(); scan();
+    });
+    panel.querySelector('#nyx-agoda-cfg-autoselect').addEventListener('change', e => {
+      settings.autoSelect = e.target.checked; saveSettings();
+    });
+    panel.querySelector('#nyx-agoda-cfg-promo').addEventListener('change', e => {
+      settings.promoHunt = e.target.checked; saveSettings();
+    });
+    panel.querySelector('#nyx-agoda-cfg-watch').addEventListener('change', e => {
+      settings.watchPrice = e.target.checked; saveSettings();
+    });
+    panel.querySelector('#nyx-agoda-curr-sel').addEventListener('change', e => {
+      if (e.target.value) switchCurrency(e.target.value);
+    });
+    panel.querySelector('#nyx-agoda-curr-hotel').addEventListener('click', () => {
+      const cc = suggestHotelCurrency();
+      if (cc) { switchCurrency(cc); notify(`현지통화 ${cc}로 전환`); }
+      else notify('현지통화 감지 실패 — 수동 선택해줘');
+    });
+    panel.querySelector('#nyx-agoda-promo-run').addEventListener('click', () => {
+      if (findPromoInput() === null) notify('결제/예약 페이지에서만 실행 가능해');
+      else promoHunt();
+    });
+    panel.querySelector('#nyx-agoda-book-now').addEventListener('click', () => {
+      bookLowestNow(collectPrices(document));
+    });
+    panel.querySelector('#nyx-agoda-promo-edit').addEventListener('click', () => {
+      const ta = panel.querySelector('#nyx-agoda-promo-list');
+      ta.style.display = ta.style.display === 'none' ? 'block' : 'none';
+      ta.value = settings.promoList.join('\n');
+    });
+    panel.querySelector('#nyx-agoda-promo-list').addEventListener('change', e => {
+      settings.promoList = e.target.value.split(/\n/).map(s => s.trim()).filter(Boolean);
+      saveSettings();
+      notify('쿠폰 목록 저장됨');
+    });
+
+    let drag = null;
+    panel.querySelector('#nyx-agoda-panel-head').addEventListener('mousedown', e => {
+      drag = { dx: e.clientX - panel.offsetLeft, dy: e.clientY - panel.offsetTop };
+    });
+    document.addEventListener('mousemove', e => {
+      if (!drag) return;
+      panel.style.left = (e.clientX - drag.dx) + 'px';
+      panel.style.right = 'auto';
+      panel.style.top = (e.clientY - drag.dy) + 'px';
+    });
+    document.addEventListener('mouseup', () => { drag = null; });
+
+    return panel;
+  }
+
+  function updatePanel(prices) {
+    const info = document.getElementById('nyx-agoda-info');
+    if (!info) return;
+    const cur = currentCurrencyFromUrl() || '자동';
+    const hotelCur = suggestHotelCurrency();
+    const min = prices.length ? Math.min(...prices.map(p => p.price.value)) : null;
+    const minP = prices.length ? prices.find(p => p.price.value === min) : null;
+    const h = prices.length ? store.get('history:' + priceHistoryKey(), null) : null;
+    let html = `통화: <b>${cur}</b>`;
+    if (hotelCur && cur && cur !== hotelCur) {
+      html += ` <span style="color:#dc2626">⚠ 현지통화 ${hotelCur} 아님 → 5% 수수료 위험</span>`;
+    }
+    if (min !== null && minP) {
+      html += `<br>최저(1박, 세전): <b>${formatNum(min)}</b> ${minP.roomName ? '· ' + minP.roomName.slice(0, 26) : ''}`;
+      const taxTotal = minP.explicitTotal !== null
+        ? minP.explicitTotal
+        : Math.round(min * 2 * (settings.taxFactor || 1.265));
+      html += `<br>2박 세금포함: <b style="color:#22c55e">≈ ${formatNum(taxTotal)}</b>`;
+    } else {
+      html += `<br>현재 최저(1박): <b>—</b>`;
+    }
+    if (h && h.min !== null) html += ` · 관찰 최저: <b>${formatNum(h.min)}</b> (${h.seen}회)`;
+    info.innerHTML = html;
+  }
+
+  function notify(msg) {
+    const log = document.getElementById('nyx-agoda-log');
+    if (log) {
+      const t = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+      log.textContent = `[${t}] ${msg}\n` + log.textContent;
+    }
+  }
+
+  function init() {
+    buildPanel();
+    scan();
+    const obs = new MutationObserver(() => scheduleScan());
+    obs.observe(document.body, { childList: true, subtree: true });
+    setInterval(() => scheduleScan(), 3000);
+    notify('로드됨 — 최저가 스캔 시작');
+    if (settings.promoHunt && /payment|checkout|book/.test(location.pathname)) {
+      setTimeout(() => { if (findPromoInput()) promoHunt(); }, 3000);
+    }
+  }
+
+  if (document.body) init();
+  else document.addEventListener('DOMContentLoaded', init);
+})();

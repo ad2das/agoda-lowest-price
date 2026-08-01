@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.5.1
+// @version      1.5.2
 // @description  전 세계 아고다 숙소 최저가 도우미 — 2인 유효 최저가 자동 선택(다국어), 1클릭 예약, 세금포함 총액, 쿠폰 자동시도, 가격 변동 감지
 // @author       Nyx
 // @match        https://www.agoda.com/*
@@ -76,6 +76,8 @@
   const OCC_EXCEEDED_RE = /인원\s*초과|인원.{0,6}(불가|제한)|초과.{0,4}(불가|제한)|선택\s*불가|매진|exceed|maximum\s*(?:occupancy|guest)|max\s*guest|定員|超過|満室|sold\s*out/i;
   const PER_NIGHT_RE = /1박당\s*요금|per\s*night|1泊(?:あたり)?/i;
   const TOTAL_RE = /(?:\d+\s*(?:nights?|박(?!당)|泊(?!あ))|(?:총액|total))/i;
+  const NOISE_RE = /UserEngagement|Review|breadcrumb|ScreenReaderOnly|StickyNav|이용후기|리뷰|レビュー|후기/i;
+  const CELL_FP_RE = /1박당|per\s*night|1泊|총액|total/i;
 
   function nightsFromUrl() {
     const m = location.search.match(/[?&]los=(\d+)/);
@@ -135,6 +137,14 @@
       if (!p) return;
       const cell = cellOf(el);
       if (!cell) return;
+      let n = el, noise = false;
+      for (let d = 0; d < 5 && n; d++) {
+        if (NOISE_RE.test(n.className || '')) { noise = true; break; }
+        n = n.parentElement;
+      }
+      if (noise || NOISE_RE.test(cell.className || '')) return;
+      const cellTxt = (cell.innerText || '').replace(/\s+/g, ' ');
+      if (!CELL_FP_RE.test(cellTxt)) return;
       const score = PURE_PRICE_RE.test(t) ? 2 : 1;
       const existing = cellPicked.get(cell);
       if (existing && existing.score >= score) return;
@@ -143,7 +153,7 @@
         if (idx >= 0) out.splice(idx, 1);
       }
       cellPicked.set(cell, { el, score });
-      out.push(el);
+      out.push({ el, cell });
     };
     for (const el of leaves) tryLeaf(el, false);
     for (const el of leaves) tryLeaf(el, true);
@@ -177,6 +187,7 @@
     if ((numStr.match(/\./g) || []).length > 1) numStr = numStr.replace(/\./g, ',');
     const num = parseFloat(numStr.replace(/,/g, ''));
     if (isNaN(num) || num <= 0 || num > 1000000000) return null;
+    if (currency === '?' && num < 100) return null;
     return { value: num, raw: t, currency };
   }
 
@@ -184,16 +195,24 @@
     const found = [];
     const seen = new Set();
     let pds = [];
+    let genericCells = null;
     try { pds = [...root.querySelectorAll(SEL.priceDisplay)]; } catch (e) {}
-    if (pds.length === 0) pds = findPriceElsGeneric(root);
+    if (pds.length === 0) {
+      const g = findPriceElsGeneric(root);
+      if (g.length > 0) {
+        pds = g.map(x => x.el);
+        genericCells = g;
+      }
+    }
     if (pds.length === 0) return found;
 
-    for (const pd of pds) {
+    for (let i = 0; i < pds.length; i++) {
+      const pd = pds[i];
       if (!isVisible(pd)) continue;
       const text = (pd.textContent || '').trim();
       const price = parsePrice(text);
       if (!price) continue;
-      const cell = pd.closest(SEL.offerCell);
+      const cell = genericCells ? genericCells[i].cell : (pd.closest(SEL.offerCell) || null);
       if (!cell || seen.has(cell)) continue;
       const cellText = (cell.innerText || '').replace(/\s+/g, ' ');
       if (OCC_1ADULT_RE.test(cellText) || OCC_EXCEEDED_RE.test(cellText)) continue;
@@ -209,6 +228,15 @@
         explicitTotal: totalM ? parseFloat(totalM[1].replace(/,/g, '')) : null
       });
     }
+    if (found.length === 0) {
+      try {
+        const sticky = root.querySelector('div.StickyNavPrice__priceDetail, [class*="StickyNavPrice" i] [class*="price" i]');
+        if (sticky && isVisible(sticky)) {
+          const price = parsePrice((sticky.textContent || '').trim());
+          if (price) found.push({ cell: null, el: sticky, price, text: price.raw, roomName: '', perNightTax: null, explicitTotal: null });
+        }
+      } catch (e) {}
+    }
     return found;
   }
 
@@ -218,7 +246,7 @@
     if (prices.length === 0) return;
     const min = Math.min(...prices.map(p => p.price.value));
     prices.forEach(p => {
-      if (p.price.value !== min) return;
+      if (p.price.value !== min || !p.cell) return;
       p.cell.classList.add('nyx-agoda-lowest-outline');
       p.cell.style.outline = '2px solid #22c55e';
       p.cell.style.outlineOffset = '2px';
@@ -244,6 +272,7 @@
     const min = Math.min(...prices.map(p => p.price.value));
     const target = prices.find(p => p.price.value === min);
     if (!target) return;
+    if (!target.cell) return;
     const btn = target.cell.querySelector(SEL.bookButton);
     if (btn && isVisible(btn) && btn.disabled !== true) {
       try { target.cell.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
@@ -265,6 +294,7 @@
     const min = Math.min(...prices.map(p => p.price.value));
     const target = prices.find(p => p.price.value === min);
     if (!target) { notify('최저가 셀 없음'); return; }
+    if (!target.cell) { notify(`최저가 확인: ${target.price.raw} — 객실 카드 로드 대기 중. 스크롤하면 재탐색해`); return; }
     const btn = target.cell.querySelector(SEL.bookButton) || target.cell.querySelector('button, a[href*="book"], [role="button"]');
     if (btn) {
       try { target.cell.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}

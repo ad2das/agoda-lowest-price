@@ -67,7 +67,7 @@
   const OCC_1ADULT_RE = /성인\s*1\s*명|1\s*adult|大人\s*1\s*名|1名|1人|for\s*1\s*person|1인\s*기준|\(1인|1인\s*(?:기준|이용)|1\s*person\b/i;
   const OCC_EXCEEDED_RE = /인원\s*초과|인원.{0,6}(불가|제한)|초과.{0,4}(불가|제한)|선택\s*불가|매진|exceed|maximum\s*(?:occupancy|guest)|max\s*guest|定員|超過|満室|sold\s*out/i;
   const PER_NIGHT_RE = /1박당\s*요금|per\s*night|1泊(?:あたり)?/i;
-  const TOTAL_RE = /(?:총액|total)|(?:\d+\s*(?:nights?|박|泊))/i;
+  const TOTAL_RE = /(?:\d+\s*(?:nights?|박(?!당)|泊(?!あ))|(?:총액|total))/i;
 
   function nightsFromUrl() {
     const m = location.search.match(/[?&]los=(\d+)/);
@@ -124,7 +124,7 @@
       const roomName = roomNameEl ? roomNameEl.textContent.trim() : '';
       if (OCC_1ADULT_RE.test(roomName)) continue;
       const perNightTaxM = cellText.match(new RegExp('(?:' + PER_NIGHT_RE.source + ')\\s*[^\\d]*([\\d][\\d,.]*)', 'i'));
-      const totalM = cellText.match(new RegExp('(?:' + TOTAL_RE.source + ')[^\\d]*([\\d][\\d,.]*)', 'i'));
+      const totalM = cellText.match(new RegExp('(?:' + TOTAL_RE.source + ')[^\\d]*([\\d][\\d,.]*)(?!\\s*(?:nights?|박|泊))', 'i'));
       found.push({
         cell, el: pd, price, text, roomName,
         perNightTax: perNightTaxM ? parseFloat(perNightTaxM[1].replace(/,/g, '')) : null,

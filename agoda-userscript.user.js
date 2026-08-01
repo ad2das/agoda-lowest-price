@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.3.0
+// @version      1.4.0
 // @description  전 세계 아고다 숙소 최저가 도우미 — 2인 유효 최저가 자동 선택(다국어), 1클릭 예약, 세금포함 총액, 쿠폰 자동시도, 가격 변동 감지
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
+// @match        https://m.agoda.com/*
 // @run-at       document-idle
 // @noframes
 // @grant        none
@@ -94,13 +95,61 @@
     return r.width > 0 && r.height > 0;
   }
 
+  function findPriceElsGeneric(root) {
+    const out = [];
+    const cellPicked = new Set();
+    const containers = [
+      '[data-selenium*="roomgrid" i]', '[data-selenium*="RoomGrid" i]',
+      '[data-selenium*="ChildRoomsList" i]', '#room-grid', '[class*="room-grid" i]',
+      '[data-selenium="MasterRoom"]'
+    ];
+    let scope = null;
+    for (const c of containers) {
+      try { scope = root.querySelector(c); } catch (e) {}
+      if (scope) break;
+    }
+    if (!scope) scope = root;
+    const leaves = [];
+    try { leaves.push(...scope.querySelectorAll('*')); } catch (e) {}
+    const cellOf = el => {
+      const c = el.closest(SEL.offerCell);
+      if (c) return c;
+      let p = el.parentElement, depth = 0;
+      while (p && depth < 4) { if (p.children.length >= 3 || (p.textContent || '').length > 400) return p; p = p.parentElement; depth++; }
+      return el.parentElement || el;
+    };
+    const tryLeaf = (el, allowBare) => {
+      if (el.children.length > 0) return;
+      const t = (el.textContent || '').trim();
+      if (!t || t.length > 30 || !/[\d]/.test(t) || !isVisible(el)) return;
+      const hasSymbol = PRICE_RE.test(t);
+      if (!hasSymbol && !allowBare) return;
+      const p = parsePrice(t);
+      if (!p) return;
+      const cell = cellOf(el);
+      if (!cell || cellPicked.has(cell)) return;
+      cellPicked.add(cell);
+      out.push(el);
+    };
+    for (const el of leaves) tryLeaf(el, false);
+    for (const el of leaves) tryLeaf(el, true);
+    return out;
+  }
+
   function parsePrice(text) {
     const m = text.match(PRICE_RE);
-    if (!m) return null;
-    const num = parseFloat(m[1].replace(/,/g, ''));
-    if (isNaN(num) || num <= 0 || num > 1000000000) return null;
-    const symbol = m[0].replace(/[\d.,\s]/g, '');
-    return { value: num, raw: m[0], currency: CURRENCY_SYMBOLS[symbol] || '?' };
+    if (m) {
+      const num = parseFloat(m[1].replace(/,/g, ''));
+      if (isNaN(num) || num <= 0 || num > 1000000000) return null;
+      const symbol = m[0].replace(/[\d.,\s]/g, '');
+      return { value: num, raw: m[0], currency: CURRENCY_SYMBOLS[symbol] || '?' };
+    }
+    const bare = text.match(/^[\d][\d,.]*$/);
+    if (bare) {
+      const num = parseFloat(bare[0].replace(/,/g, ''));
+      if (num >= 1000 && num <= 1000000000) return { value: num, raw: bare[0], currency: '?' };
+    }
+    return null;
   }
 
   function collectPrices(root) {
@@ -108,6 +157,7 @@
     const seen = new Set();
     let pds = [];
     try { pds = [...root.querySelectorAll(SEL.priceDisplay)]; } catch (e) {}
+    if (pds.length === 0) pds = findPriceElsGeneric(root);
     if (pds.length === 0) return found;
 
     for (const pd of pds) {
@@ -174,8 +224,16 @@
     }
   }
 
-  function bookLowestNow(prices) {
-    if (prices.length === 0) { notify('최저가 셀을 못 찾았어 — 페이지 다시 스캔 중'); scan(); return; }
+  function bookLowestNow(prices, retries = 0) {
+    if (prices.length === 0) {
+      if (retries < 4) {
+        notify(`최저가 셀 탐색 중... (${retries + 1}/4)`);
+        setTimeout(() => bookLowestNow(collectPrices(document), retries + 1), 3000);
+      } else {
+        notify('최저가 셀을 못 찾았어 — 스크린샷과 [진단] 로그를 알려줘');
+      }
+      return;
+    }
     const min = Math.min(...prices.map(p => p.price.value));
     const target = prices.find(p => p.price.value === min);
     if (!target) { notify('최저가 셀 없음'); return; }
@@ -322,11 +380,26 @@
     }, 600);
   }
 
+  function logDiagnostics() {
+    let pd = 0, cells = 0, grid = false, priceTexts = 0;
+    try {
+      pd = document.querySelectorAll(SEL.priceDisplay).length;
+      cells = document.querySelectorAll(SEL.offerCell).length;
+      grid = !!document.querySelector('[data-selenium*="roomgrid" i], [data-selenium*="RoomGrid" i], #room-grid');
+      const scope = document.querySelector('[data-selenium*="roomgrid" i], [data-selenium*="RoomGrid" i], #room-grid') || document;
+      priceTexts = [...scope.querySelectorAll('*')].filter(el => el.children.length === 0 && /[\d]/.test((el.textContent || '').trim()) && (el.textContent || '').trim().length < 30 && isVisible(el)).length;
+    } catch (e) {}
+    notify(`[진단] PriceDisplay:${pd} 셀:${cells} 그리드:${grid} 가격텍스트:${priceTexts} URL:${location.pathname.slice(0, 60)}`);
+  }
+
   let lastScan = null;
   function scan() {
     if (!settings.highlight && !settings.autoSelect && !settings.watchPrice) return;
     const prices = collectPrices(document);
-    if (prices.length === 0) return;
+    if (prices.length === 0) {
+      if (settings.watchPrice) logDiagnostics();
+      return;
+    }
     if (settings.highlight) highlightLowest(prices);
     if (settings.autoSelect) autoSelectLowest(prices);
     if (settings.watchPrice) recordPrice(Math.min(...prices.map(p => p.price.value)));

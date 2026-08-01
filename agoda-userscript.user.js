@@ -1,12 +1,16 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.4.0
+// @version      1.5.1
 // @description  전 세계 아고다 숙소 최저가 도우미 — 2인 유효 최저가 자동 선택(다국어), 1클릭 예약, 세금포함 총액, 쿠폰 자동시도, 가격 변동 감지
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
 // @match        https://m.agoda.com/*
+// @updateURL    https://raw.githubusercontent.com/ad2das/agoda-lowest-price/main/agoda-userscript.user.js
+// @downloadURL  https://raw.githubusercontent.com/ad2das/agoda-lowest-price/main/agoda-userscript.user.js
+// @homepageURL  https://github.com/ad2das/agoda-lowest-price
+// @supportURL   https://github.com/ad2das/agoda-lowest-price/issues
 // @run-at       document-idle
 // @noframes
 // @grant        none

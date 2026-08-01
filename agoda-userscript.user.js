@@ -52,9 +52,12 @@
     'NZ$': 'NZD', 'CN¥': 'CNY', 'R$': 'BRL', 'RM': 'MYR', 'Rp': 'IDR',
     '$': 'USD', '€': 'EUR', '£': 'GBP', '¥': 'JPY', '₩': 'KRW', '￦': 'KRW',
     '฿': 'THB', '₹': 'INR', '₫': 'VND', '₱': 'PHP', '₺': 'TRY',
-    '₴': 'UAH', 'zł': 'PLN', 'CHF': 'CHF'
+    '₴': 'UAH', 'zł': 'PLN', 'CHF': 'CHF', '원': 'KRW', '엔': 'JPY'
   };
   const PRICE_RE = /(?:US\$|S\$|HK\$|A\$|C\$|NZ\$|CN¥|R\$|RM|Rp|zł|CHF|\$|€|£|¥|₩|￦|฿|₹|₫|₱|₺|₴)\s?([\d][\d,.]*)/;
+  const CURRENCY_CODE_RE = /\b(?:KRW|USD|JPY|EUR|GBP|CNY|HKD|SGD|THB|IDR|MYR|PHP|VND|TWD|AUD|CAD|CHF|NZD|INR|AED|BRL|TRY|MXN|ZAR|PLN|SEK|NOK|DKK|CZK|UAH)\b/i;
+  const HAS_CURRENCY_RE = /^(?:[₩$¥€£฿₹₫₱₺₴]+|(?:US|S|HK|A|C|NZ)\$|CN¥|Rp|RM|zł|CHF|원|엔|[A-Z]{3}\b)/i;
+  const PURE_PRICE_RE = /^(?:[₩$¥€£฿₹₫₱₺₴]+|(?:US|S|HK|A|C|NZ)\$|CN¥|Rp|RM|zł|CHF)?\s*[\d][\d,.]*\s*(?:원|엔|[A-Z]{3})?$/i;
 
   const SEL = {
     offerCell: '[data-selenium="ChildRoomsList-roomCell"]',
@@ -97,7 +100,6 @@
 
   function findPriceElsGeneric(root) {
     const out = [];
-    const cellPicked = new Set();
     const containers = [
       '[data-selenium*="roomgrid" i]', '[data-selenium*="RoomGrid" i]',
       '[data-selenium*="ChildRoomsList" i]', '#room-grid', '[class*="room-grid" i]',
@@ -111,6 +113,7 @@
     if (!scope) scope = root;
     const leaves = [];
     try { leaves.push(...scope.querySelectorAll('*')); } catch (e) {}
+    const cellPicked = new Map();
     const cellOf = el => {
       const c = el.closest(SEL.offerCell);
       if (c) return c;
@@ -121,14 +124,21 @@
     const tryLeaf = (el, allowBare) => {
       if (el.children.length > 0) return;
       const t = (el.textContent || '').trim();
-      if (!t || t.length > 30 || !/[\d]/.test(t) || !isVisible(el)) return;
-      const hasSymbol = PRICE_RE.test(t);
-      if (!hasSymbol && !allowBare) return;
+      if (!t || t.length > 40 || !/[\d]/.test(t) || !isVisible(el)) return;
+      const hasCurrency = HAS_CURRENCY_RE.test(t);
+      if (!hasCurrency && !allowBare) return;
       const p = parsePrice(t);
       if (!p) return;
       const cell = cellOf(el);
-      if (!cell || cellPicked.has(cell)) return;
-      cellPicked.add(cell);
+      if (!cell) return;
+      const score = PURE_PRICE_RE.test(t) ? 2 : 1;
+      const existing = cellPicked.get(cell);
+      if (existing && existing.score >= score) return;
+      if (existing) {
+        const idx = out.indexOf(existing.el);
+        if (idx >= 0) out.splice(idx, 1);
+      }
+      cellPicked.set(cell, { el, score });
       out.push(el);
     };
     for (const el of leaves) tryLeaf(el, false);
@@ -137,19 +147,33 @@
   }
 
   function parsePrice(text) {
-    const m = text.match(PRICE_RE);
-    if (m) {
-      const num = parseFloat(m[1].replace(/,/g, ''));
-      if (isNaN(num) || num <= 0 || num > 1000000000) return null;
-      const symbol = m[0].replace(/[\d.,\s]/g, '');
-      return { value: num, raw: m[0], currency: CURRENCY_SYMBOLS[symbol] || '?' };
+    const t = text.trim();
+    if (!t || t.length > 40) return null;
+    let numStr = null;
+    let currency = '?';
+    const symPrefix = t.match(/^((?:US|S|HK|A|C|NZ)\$|CN¥|Rp|RM|zł|CHF|[₩$¥€£฿₹₫₱₺₴])\s*([\d][\d,.]*)/i);
+    const codePrefix = t.match(CURRENCY_CODE_RE);
+    const symSuffix = t.match(/^([\d][\d,.]*)\s*(원|엔|(?:US|S|HK|A|C|NZ)\$|CN¥|Rp|RM|zł|CHF|[₩$¥€£฿₹₫₱₺₴]|[A-Z]{3})?$/i);
+    if (symPrefix) {
+      numStr = symPrefix[2];
+      currency = CURRENCY_SYMBOLS[symPrefix[1]] || CURRENCY_SYMBOLS[symPrefix[1].toUpperCase()] || '?';
+    } else if (symSuffix && symSuffix[1]) {
+      numStr = symSuffix[1];
+      if (symSuffix[2]) currency = CURRENCY_SYMBOLS[symSuffix[2].toUpperCase()] || (symSuffix[2].length === 3 ? symSuffix[2].toUpperCase() : '?');
+    } else if (codePrefix) {
+      const rest = t.slice(codePrefix.index + codePrefix[0].length).trim();
+      const n = rest.match(/^([\d][\d,.]*)/);
+      if (n) { numStr = n[1]; currency = codePrefix[0].toUpperCase(); }
     }
-    const bare = text.match(/^[\d][\d,.]*$/);
-    if (bare) {
-      const num = parseFloat(bare[0].replace(/,/g, ''));
-      if (num >= 1000 && num <= 1000000000) return { value: num, raw: bare[0], currency: '?' };
+    if (!numStr) {
+      const bare = t.match(/^[\d][\d,.]*$/);
+      if (bare) numStr = bare[0];
     }
-    return null;
+    if (!numStr) return null;
+    if ((numStr.match(/\./g) || []).length > 1) numStr = numStr.replace(/\./g, ',');
+    const num = parseFloat(numStr.replace(/,/g, ''));
+    if (isNaN(num) || num <= 0 || num > 1000000000) return null;
+    return { value: num, raw: t, currency };
   }
 
   function collectPrices(root) {
@@ -382,14 +406,17 @@
 
   function logDiagnostics() {
     let pd = 0, cells = 0, grid = false, priceTexts = 0;
+    let samples = [];
     try {
       pd = document.querySelectorAll(SEL.priceDisplay).length;
       cells = document.querySelectorAll(SEL.offerCell).length;
       grid = !!document.querySelector('[data-selenium*="roomgrid" i], [data-selenium*="RoomGrid" i], #room-grid');
       const scope = document.querySelector('[data-selenium*="roomgrid" i], [data-selenium*="RoomGrid" i], #room-grid') || document;
-      priceTexts = [...scope.querySelectorAll('*')].filter(el => el.children.length === 0 && /[\d]/.test((el.textContent || '').trim()) && (el.textContent || '').trim().length < 30 && isVisible(el)).length;
+      const els = [...scope.querySelectorAll('*')].filter(el => el.children.length === 0 && /[\d]/.test((el.textContent || '').trim()) && (el.textContent || '').trim().length < 40 && isVisible(el));
+      priceTexts = els.length;
+      samples = els.slice(0, 6).map(el => (el.textContent || '').trim().slice(0, 25));
     } catch (e) {}
-    notify(`[진단] PriceDisplay:${pd} 셀:${cells} 그리드:${grid} 가격텍스트:${priceTexts} URL:${location.pathname.slice(0, 60)}`);
+    notify(`[진단] PriceDisplay:${pd} 셀:${cells} 그리드:${grid} 가격텍스트:${priceTexts} 예:${samples.join('|')} URL:${location.pathname.slice(0, 50)}`);
   }
 
   let lastScan = null;

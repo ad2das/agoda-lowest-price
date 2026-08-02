@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.8.0
-// @description  전 세계 아고다 숙소 최저가 도우미 — 전 범위 적응형 CID 탐색/재검증, 2인 유효 최저가 자동 선택, 세금포함 총액, 쿠폰 자동시도
+// @version      1.9.0
+// @description  전 세계 아고다 숙소 최저가 도우미 — 현행 실사용 CID 전수 비교/재검증, 2인 유효 최저가 자동 선택, 세금포함 총액, 쿠폰 자동시도
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
@@ -88,31 +88,106 @@
   const CID_CACHE_TTL = 30 * 60 * 1000;
   const CID_CONCURRENCY = 4;
   const CID_REQUEST_TIMEOUT = 12000;
-  const CID_REQUEST_INTERVAL = 200;
+  const CID_REQUEST_INTERVAL = 180;
   const CID_RANGE_MAX = 9999999;
-  const CID_RANGE_SAMPLE_COUNT = 48;
-  const CID_MAX_CANDIDATES = 150;
   const CID_VERIFY_ROUNDS = 2;
+  const CID_VERIFY_TOP = 5;
+  const CID_VERIFY_MAX_CANDIDATES = 20;
+  const CID_CACHE_VERSION = 4;
+  const CID_REGISTRY_VERSION = '2026-08-02';
+  const CID_REDIRECT_MAX_HOPS = 3;
+  const CID_NATURAL_RESPONSE_TIMEOUT = 14000;
+  const CID_REJECT_TTL = 10 * 60 * 1000;
 
-  const PROBE_POOL = (() => {
-    const pool = new Set([
-      -1, 2, 101, 501, 1000, 5000, 9900, 10000, 10400, 11500, 11600,
-      16001, 16100, 16300, 16500, 17200, 17500,
-      23100, 25200, 25400, 25600, 26000, 27000, 28300, 29300, 31200, 31900,
-      33200, 36400, 38000, 40400, 41100, 44800, 46300, 47999, 48000, 48400,
-      63700, 65000, 66800, 68300, 75000, 78800, 79600, 80400, 82100, 120000,
-      150000, 190838, 210000, 255000, 285000, 500000, 750000, 1000000,
-      1100000, 1234567, 1500000, 1800000, 1844103, 1844104, 1844105,
-      2000000, 2500000, 3000000, 5000000, 7500000, 9000000, 9999999
-    ]);
-    return [...pool];
-  })();
+  // Current public price paths, verified from live Agoda promotion pages and
+  // maintained Korean comparison tools. These are partner/channel IDs, not a
+  // numeric discount range; adjacent or random numbers have no useful meaning.
+  const ACTIVE_HIGH_CIDS = Object.freeze([
+    1429945, 1442771, 1444054, 1449508, 1450161, 1460862, 1464882, 1484583,
+    1555727, 1563295, 1585118, 1606074, 1606301, 1609787, 1619447, 1619927,
+    1641444, 1641446, 1644618, 1648084, 1652904, 1654104, 1722624, 1729471,
+    1729890, 1739609,
+    1744635, 1748498, 1760133, 1762758, 1776095, 1776688, 1783115, 1788894,
+    1795682, 1795691, 1800120, 1800982, 1801110, 1806212, 1806428, 1807978,
+    1810992, 1813297, 1813444, 1814715, 1822934, 1827579, 1829968, 1830773,
+    1833981, 1833982, 1840309, 1843082, 1844104, 1844160, 1845109, 1845157,
+    1881766, 1881887, 1889283, 1889284, 1889308, 1889309, 1889316, 1889319,
+    1889328,
+    1889478, 1889487, 1889493, 1889572, 1889575, 1889576, 1889577, 1889578,
+    1889579, 1889580, 1889877, 1891357, 1891504, 1895693, 1897427, 1897955,
+    1899122, 1899665, 1899694, 1901150, 1901202, 1901260, 1901276, 1902785,
+    1903104, 1903131, 1903441, 1904253, 1904827, 1906661, 1906692, 1908612,
+    1908617, 1912836, 1913564, 1913631, 1913764, 1914262, 1914395, 1914396,
+    1914474, 1914475, 1915205, 1917257, 1917334, 1917349, 1917400, 1917614,
+    1920392, 1920395, 1922847, 1922868, 1922887, 1925109, 1925201, 1926014,
+    1928772, 1929418, 1929419, 1930783, 1932810, 1933756, 1934182, 1934184,
+    1934186, 1934255, 1935943,
+    1936086, 1937284, 1937285, 1937288, 1937289, 1937290, 1937291, 1937292,
+    1937293, 1937294, 1937295, 1937708, 1937712, 1939923, 1942636, 1943294,
+    1943398, 1944254, 1945153, 1945987, 1945988, 1945989, 1945990, 1945991,
+    1945992, 1946331, 1946333, 1949417, 1952304, 1953064, 1957693, 1958938,
+    1960466, 1960725, 1961233, 1961498, 1963209, 1963210, 1963211
+  ]);
+  const ACTIVE_LOW_CIDS = Object.freeze([
+    1716632, 1741590, 1770664, 1830447, 1837758, 1892424, 1959939
+  ]);
+  const ACTIVE_CIDS = Object.freeze([...ACTIVE_HIGH_CIDS, ...ACTIVE_LOW_CIDS]);
+  const CID_TAGS = Object.freeze({
+    1895693: 'A100692912', 1937708: 'A100692912', 1942636: 'A100692912'
+  });
+
+  // 560 URLScan captures (2018-2026), public repositories, official docs and
+  // public affiliate links yielded these 241 real-link candidates. They are
+  // retained for the explicit deep audit, but are not all presumed current or
+  // discounted and therefore do not slow every automatic scan.
+  const PUBLIC_OBSERVED_CIDS = Object.freeze([
+    1439847, 1450161, 1451793, 1497421, 1550300, 1555740, 1558948, 1563295,
+    1568156, 1587480, 1587497, 1595807, 1597408, 1597784, 1598713, 1602582,
+    1602809, 1604220, 1606297, 1607169, 1607177, 1607809, 1608701, 1616199,
+    1618060, 1618814, 1623435, 1641446, 1643939, 1646650, 1647692, 1648249,
+    1649895, 1649959, 1654104, 1654994, 1656583, 1657643, 1716632, 1716737,
+    1719676, 1720055, 1720706, 1723497, 1723698, 1724129, 1725465, 1729471,
+    1729675, 1729890, 1730176, 1730560, 1731197, 1731353, 1731641, 1732276,
+    1732639, 1732641, 1733908, 1733999, 1735414, 1741590, 1742016, 1748498,
+    1752828, 1753807, 1754413, 1755750, 1755877, 1756163, 1760133, 1762810,
+    1763313, 1763347, 1765710, 1766357, 1770664, 1770737, 1771063, 1772896,
+    1775627, 1776034, 1776688, 1779080, 1779118, 1781052, 1783115, 1784497,
+    1786151, 1792737, 1797169, 1797640, 1798666, 1799922, 1800120, 1801110,
+    1806212, 1807747,
+    1807881, 1811661, 1812489, 1813352, 1813866, 1815158, 1816167, 1819819,
+    1823759, 1825778, 1826290, 1827482, 1827579, 1828703, 1829511, 1829968,
+    1830110,
+    1830447, 1832015, 1833101, 1833981, 1833982, 1836036, 1837758, 1841704,
+    1841706, 1841724, 1841941, 1841944, 1844104, 1844160, 1845109, 1845157,
+    1845995, 1856692, 1880000, 1881766, 1888052, 1889319, 1889572, 1891440,
+    1891446, 1891460, 1891461, 1891463, 1891467, 1891504, 1892424, 1894892,
+    1895406, 1895423, 1895693, 1897057, 1897699, 1898889, 1899785, 1901283,
+    1904510, 1904827, 1905113, 1907349, 1907611, 1908612, 1908617, 1911618,
+    1912284, 1913632, 1913764, 1914935,
+    1914936, 1914940, 1915013, 1915558, 1917158, 1917257, 1917334, 1917349,
+    1917464, 1917477, 1917614, 1917809, 1918349, 1918541, 1918750, 1922343,
+    1922502,
+    1922847, 1922865, 1922868, 1922872, 1922884, 1922886, 1922887, 1922935,
+    1923393, 1924244, 1925339, 1925673, 1926018, 1926071, 1929798, 1931173,
+    1931194,
+    1931211, 1931228, 1931349, 1931426, 1931451, 1931467, 1931512, 1931531,
+    1931585, 1931695, 1931705, 1931714, 1931927, 1932236, 1932324, 1932391,
+    1932561, 1932749, 1932810, 1933886, 1936997, 1937708, 1937712, 1940113,
+    1940376, 1942636, 1942726, 1943282, 1944090, 1945988, 1946392, 1947165,
+    1951235, 1955468, 1957119, 1959939, 1961347, 1961634,
+    1962043, 1962262
+  ]);
 
   let capturedLegacyTemplate = null;
   let capturedRoomGridTemplate = null;
   let cidSweepPromise = null;
+  let cidSweepSignature = null;
+  let cidSweepQueued = null;
   let cidStatus = { phase: 'idle', done: 0, total: 0, source: null };
   let cidNextRequestAt = 0;
+  let cidBackoffUntil = 0;
+  const runtimeDiscoveredCids = new Map();
+  const naturalPriceObservations = [];
 
   function normalizeCid(value) {
     if (value === null || value === undefined || value === '') return null;
@@ -146,18 +221,19 @@
   }
 
   function captureCidParamsFrom(urlStr) {
-    if (!urlStr || !urlStr.includes('GetSecondaryData')) return;
+    if (!urlStr || !urlStr.includes('GetSecondaryData')) return null;
     try {
       const u = new URL(urlStr, location.href);
       const params = u.searchParams;
-      if (!params.get('hotel_id')) return;
+      if (!params.get('hotel_id')) return null;
       capturedLegacyTemplate = {
         url: u.pathname + u.search,
         hotelId: params.get('hotel_id'),
         cid: normalizeCid(params.get('cid')),
         capturedAt: Date.now()
       };
-    } catch (e) {}
+      return capturedLegacyTemplate;
+    } catch (e) { return null; }
   }
 
   function saveRoomGridTemplate(urlStr, headers, bodyText) {
@@ -173,20 +249,129 @@
         cid: normalizeCid(new Headers(headers || {}).get('ag-cid')),
         capturedAt: Date.now()
       };
-    } catch (e) {}
+      return capturedRoomGridTemplate;
+    } catch (e) { return null; }
+  }
+
+  function cidFromHeaders(headers) {
+    try { return normalizeCid(new Headers(headers || {}).get('ag-cid')); }
+    catch (e) { return null; }
+  }
+
+  function textFingerprint(value) {
+    let hash = 2166136261;
+    const text = String(value || '');
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  }
+
+  function templateFingerprint(kind, template, ctx) {
+    if (!template || !template.url || !ctx) return null;
+    try {
+      const u = new URL(template.url, location.href);
+      ['cid', 'tag', 'ds', 'searchrequestid'].forEach(key => u.searchParams.delete(key));
+      const query = [...u.searchParams.entries()].sort((a, b) => a[0].localeCompare(b[0]) || a[1].localeCompare(b[1]));
+      const body = kind === 'room-grid' ? JSON.stringify(template.body || {}) : '';
+      return `${kind}|${u.pathname}|${criteriaSignature(ctx)}|${textFingerprint(JSON.stringify(query) + '|' + body)}`;
+    } catch (e) { return null; }
+  }
+
+  function requestMetaFromTemplate(kind, template, cid) {
+    const ctx = kind === 'room-grid'
+      ? roomGridContextFromTemplate(template)
+      : legacyContextFromTemplate(template);
+    return {
+      kind, cid: normalizeCid(cid), ctx: ctx ? Object.assign({}, ctx) : null,
+      signature: criteriaSignature(ctx), hotelId: ctx && ctx.hotelId ? String(ctx.hotelId) : null,
+      fingerprint: templateFingerprint(kind, template, ctx)
+    };
   }
 
   function captureCidRequest(input, init) {
     const url = requestUrl(input);
-    if (!url) return;
-    captureCidParamsFrom(url);
-    if (!url.includes('/api/v1/property/room-grid')) return;
+    if (!url) return null;
+    const legacyTemplate = captureCidParamsFrom(url);
+    if (url.includes('GetSecondaryData')) {
+      try {
+        const u = new URL(url, location.href);
+        return requestMetaFromTemplate('secondary', legacyTemplate, u.searchParams.get('cid'));
+      } catch (e) { return requestMetaFromTemplate('secondary', legacyTemplate, null); }
+    }
+    if (!url.includes('/api/v1/property/room-grid')) return null;
     try {
       const request = typeof Request !== 'undefined' && input instanceof Request ? input : null;
       const headers = (init && init.headers) || (request && request.headers) || {};
       const directBody = init && init.body;
-      if (typeof directBody === 'string') saveRoomGridTemplate(url, headers, directBody);
-      else if (request) request.clone().text().then(t => saveRoomGridTemplate(url, headers, t)).catch(() => {});
+      const cid = cidFromHeaders(headers);
+      if (typeof directBody === 'string') {
+        return requestMetaFromTemplate('room-grid', saveRoomGridTemplate(url, headers, directBody), cid);
+      }
+      const meta = { kind: 'room-grid', cid, ctx: null, signature: null, hotelId: null, fingerprint: null };
+      if (request) request.clone().text().then(t => {
+        Object.assign(meta, requestMetaFromTemplate('room-grid', saveRoomGridTemplate(url, headers, t), cid));
+      }).catch(() => {});
+      return meta;
+    } catch (e) { return { kind: 'room-grid', cid: null, ctx: null, signature: null, hotelId: null, fingerprint: null }; }
+  }
+
+  function addRuntimeCid(value, signature) {
+    const cid = normalizeCid(value);
+    if (cid === null || cid < 1000000 || !signature) return;
+    if (!runtimeDiscoveredCids.has(signature)) runtimeDiscoveredCids.set(signature, new Set());
+    const bucket = runtimeDiscoveredCids.get(signature);
+    if (bucket.size < 100) bucket.add(cid);
+  }
+
+  function collectCampaignCids(node, out, parentKey = '') {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) {
+      node.forEach(value => collectCampaignCids(value, out, parentKey));
+      return;
+    }
+    for (const [key, value] of Object.entries(node)) {
+      const lower = key.toLowerCase();
+      if (lower === 'campaigncid' || lower === 'activecid' ||
+          (lower === 'cid' && /campaign/.test(parentKey.toLowerCase()))) {
+        const cid = normalizeCid(value);
+        if (cid !== null && cid >= 1000000) out.add(cid);
+      }
+      collectCampaignCids(value, out, key);
+    }
+  }
+
+  function captureCidResponse(response, url, requestMeta = null) {
+    if (!response || !url || (!url.includes('/api/v1/property/room-grid') && !url.includes('GetSecondaryData'))) return;
+    if (response.ok === false) return;
+    try {
+      response.clone().text().then(text => {
+        let payload;
+        try { payload = JSON.parse(text); } catch (e) { return; }
+        const ctx = requestMeta && requestMeta.ctx ? requestMeta.ctx : probeContext();
+        const signature = requestMeta && requestMeta.signature ? requestMeta.signature : criteriaSignature(ctx);
+        const found = new Set();
+        collectCampaignCids(payload, found);
+        found.forEach(cid => addRuntimeCid(cid, signature));
+
+        let requestCid = normalizeCid(requestMeta && requestMeta.cid);
+        if (requestCid === null && url.includes('GetSecondaryData')) {
+          try { requestCid = normalizeCid(new URL(url, location.href).searchParams.get('cid')); } catch (e) {}
+        }
+        const total = url.includes('/api/v1/property/room-grid')
+          ? extractModernTotal(payload, ctx || urlCriteria())
+          : extractLegacyTotal(payload, ctx || urlCriteria());
+        const hotelId = requestMeta && requestMeta.hotelId || (ctx && ctx.hotelId);
+        const correlated = requestMeta && requestMeta.signature && requestMeta.fingerprint && requestMeta.kind;
+        if (requestCid !== null && total !== null && correlated && hotelId) {
+          naturalPriceObservations.push({
+            cid: requestCid, total, signature, hotelId: String(hotelId), kind: requestMeta.kind,
+            fingerprint: requestMeta.fingerprint, observedAt: Date.now()
+          });
+          if (naturalPriceObservations.length > 30) naturalPriceObservations.splice(0, naturalPriceObservations.length - 30);
+        }
+      }).catch(() => {});
     } catch (e) {}
   }
 
@@ -194,8 +379,11 @@
     try {
       if (nativeFetch) {
         window.fetch = function (...args) {
-          captureCidRequest(args[0], args[1]);
-          return nativeFetch.apply(this, args);
+          const requestMeta = captureCidRequest(args[0], args[1]);
+          const url = requestUrl(args[0]);
+          const pending = nativeFetch.apply(this, args);
+          Promise.resolve(pending).then(response => captureCidResponse(response, url, requestMeta)).catch(() => {});
+          return pending;
         };
       }
     } catch (e) {}
@@ -216,8 +404,23 @@
       };
       XMLHttpRequest.prototype.send = function (body) {
         const meta = xhrMeta.get(this);
+        let requestMeta = null;
         if (meta && meta.url.includes('/api/v1/property/room-grid') && typeof body === 'string') {
-          saveRoomGridTemplate(meta.url, meta.headers, body);
+          const cid = cidFromHeaders(meta.headers);
+          requestMeta = requestMetaFromTemplate('room-grid', saveRoomGridTemplate(meta.url, meta.headers, body), cid);
+        } else if (meta && meta.url.includes('GetSecondaryData')) {
+          try {
+            const cid = normalizeCid(new URL(meta.url, location.href).searchParams.get('cid'));
+            requestMeta = requestMetaFromTemplate('secondary', captureCidParamsFrom(meta.url), cid);
+          } catch (e) { requestMeta = requestMetaFromTemplate('secondary', null, null); }
+        }
+        if (meta && (meta.url.includes('/api/v1/property/room-grid') || meta.url.includes('GetSecondaryData'))) {
+          this.addEventListener('load', () => {
+            try {
+              const fakeResponse = { clone: () => ({ text: () => Promise.resolve(this.responseText || '') }) };
+              captureCidResponse(fakeResponse, meta.url, requestMeta);
+            } catch (e) {}
+          }, { once: true });
         }
         return origSend.apply(this, arguments);
       };
@@ -242,6 +445,7 @@
       rooms: q.get('rooms') || '1',
       adults: q.get('adults') || '2',
       children: q.get('children') || '0',
+      childrenAges: q.get('childrenAges') || q.get('childAges') || q.get('childages') || '',
       curr: (q.get('curr') || '').toUpperCase()
     };
   }
@@ -257,35 +461,49 @@
     return '';
   }
 
+  function roomGridContextFromTemplate(template) {
+    if (!template || !template.body) return null;
+    const fromUrl = urlCriteria();
+    const b = template.body;
+    const sc = b.searchCriteria || {};
+    const ages = sc.childrenAges || sc.childAges || [];
+    return {
+      source: 'room-grid', hotelId: String(b.propertyId),
+      checkIn: sc.checkIn || fromUrl.checkIn,
+      checkOut: sc.checkOut || fromUrl.checkOut,
+      los: fromUrl.los, rooms: String(sc.rooms || fromUrl.rooms),
+      adults: String(sc.adults || fromUrl.adults),
+      children: String(Array.isArray(ages) ? ages.length : (sc.children || fromUrl.children)),
+      childrenAges: Array.isArray(ages) ? ages.map(age => Number(age)).filter(Number.isFinite).join(',') : fromUrl.childrenAges,
+      curr: pageCurrencyKey() || String((b.userContext && b.userContext.currencyId) || ''),
+      activeCid: template.cid ?? currentCid() ?? DEFAULT_CID
+    };
+  }
+
+  function legacyContextFromTemplate(template) {
+    if (!template || !template.url) return null;
+    const fromUrl = urlCriteria();
+    const q = new URL(template.url, location.href).searchParams;
+    return {
+      source: 'secondary', hotelId: template.hotelId,
+      checkIn: q.get('checkIn') || fromUrl.checkIn,
+      checkOut: q.get('checkOut') || fromUrl.checkOut,
+      los: q.get('los') || fromUrl.los, rooms: q.get('rooms') || fromUrl.rooms,
+      adults: q.get('adults') || fromUrl.adults,
+      children: q.get('children') || fromUrl.children,
+      childrenAges: q.get('childrenAges') || q.get('childAges') || q.get('childages') || fromUrl.childrenAges,
+      curr: (q.get('curr') || pageCurrencyKey() || '').toUpperCase(),
+      activeCid: template.cid ?? currentCid() ?? DEFAULT_CID
+    };
+  }
+
   function probeContext() {
     const fromUrl = urlCriteria();
     if (capturedRoomGridTemplate) {
-      const b = capturedRoomGridTemplate.body;
-      const sc = b.searchCriteria || {};
-      const ages = sc.childrenAges || sc.childAges || [];
-      return {
-        source: 'room-grid', hotelId: String(b.propertyId),
-        checkIn: sc.checkIn || fromUrl.checkIn,
-        checkOut: sc.checkOut || fromUrl.checkOut,
-        los: fromUrl.los, rooms: String(sc.rooms || fromUrl.rooms),
-        adults: String(sc.adults || fromUrl.adults),
-        children: String(Array.isArray(ages) ? ages.length : (sc.children || fromUrl.children)),
-        curr: pageCurrencyKey() || String((b.userContext && b.userContext.currencyId) || ''),
-        activeCid: capturedRoomGridTemplate.cid ?? currentCid() ?? DEFAULT_CID
-      };
+      return roomGridContextFromTemplate(capturedRoomGridTemplate);
     }
     if (capturedLegacyTemplate) {
-      const q = new URL(capturedLegacyTemplate.url, location.href).searchParams;
-      return {
-        source: 'secondary', hotelId: capturedLegacyTemplate.hotelId,
-        checkIn: q.get('checkIn') || fromUrl.checkIn,
-        checkOut: q.get('checkOut') || fromUrl.checkOut,
-        los: q.get('los') || fromUrl.los, rooms: q.get('rooms') || fromUrl.rooms,
-        adults: q.get('adults') || fromUrl.adults,
-        children: q.get('children') || fromUrl.children,
-        curr: (q.get('curr') || pageCurrencyKey() || '').toUpperCase(),
-        activeCid: capturedLegacyTemplate.cid ?? currentCid() ?? DEFAULT_CID
-      };
+      return legacyContextFromTemplate(capturedLegacyTemplate);
     }
     const hid = hotelIdFromDom();
     if (!hid) return null;
@@ -299,7 +517,7 @@
       const start = Date.parse(ctx.checkIn), end = Date.parse(ctx.checkOut);
       if (Number.isFinite(start) && Number.isFinite(end) && end > start) stayLength = Math.round((end - start) / 86400000);
     }
-    return [ctx.hotelId, ctx.checkIn, stayLength, ctx.rooms, ctx.adults, ctx.children, ctx.curr]
+    return [ctx.hotelId, ctx.checkIn, stayLength, ctx.rooms, ctx.adults, ctx.children, ctx.childrenAges || '', ctx.curr]
       .map(v => encodeURIComponent(String(v || ''))).join('|');
   }
 
@@ -312,7 +530,12 @@
     const key = cidCacheKey(ctx);
     if (!key) return null;
     const c = store.get(key, null);
-    if (!c || c.cacheVersion !== 3 || !c.ts || !c.verifiedAt || Date.now() - c.ts > CID_CACHE_TTL) return null;
+    const ttl = Number.isFinite(c && c.ttlMs) ? Math.min(CID_CACHE_TTL, Math.max(1000, c.ttlMs)) : CID_CACHE_TTL;
+    if (!c || c.cacheVersion !== CID_CACHE_VERSION || c.registryVersion !== CID_REGISTRY_VERSION ||
+        !c.ts || !c.verifiedAt || Date.now() - c.ts > ttl) return null;
+    if (normalizeCid(c.baselineCid) === null || !Number.isFinite(c.baselineTotal) || c.baselineTotal <= 0) return null;
+    if (c.bestCid !== null && normalizeCid(c.bestCid) === null) return null;
+    if (!Number.isFinite(c.bestTotal) || c.bestTotal <= 0) return null;
     return c;
   }
 
@@ -347,59 +570,102 @@
         const cid = normalizeCid(new URL(a.href, location.href).searchParams.get('cid'));
         if (cid !== null) found.push(cid);
       });
+      const html = document.documentElement && document.documentElement.innerHTML || '';
+      const campaignRe = /["'](?:campaignCid|activeCid)["']\s*:\s*["']?(\d{6,8})/gi;
+      let match;
+      while ((match = campaignRe.exec(html)) && found.length < 100) {
+        const cid = normalizeCid(match[1]);
+        if (cid !== null) found.push(cid);
+      }
     } catch (e) {}
     return found;
   }
 
-  function hashString(value) {
-    let hash = 2166136261;
-    for (let i = 0; i < value.length; i++) {
-      hash ^= value.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    return hash >>> 0;
+  function rejectedCidKey(ctx) {
+    const sig = criteriaSignature(ctx);
+    return sig ? NAME + ':cid-rejected:' + sig : null;
   }
 
-  function seededRandom(seed) {
-    return () => {
-      seed |= 0;
-      seed = seed + 0x6D2B79F5 | 0;
-      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
-      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
-      return ((t ^ t >>> 14) >>> 0) / 4294967296;
-    };
+  function rejectedCidEntries(ctx) {
+    const key = rejectedCidKey(ctx);
+    if (!key) return [];
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem(key) || '[]');
+      if (!Array.isArray(parsed)) return [];
+      const now = Date.now();
+      return parsed.map(item => typeof item === 'object' && item !== null
+        ? { cid: normalizeCid(item.cid), ts: Number(item.ts) }
+        : { cid: normalizeCid(item), ts: 0 })
+        .filter(item => item.cid !== null && Number.isFinite(item.ts) && now - item.ts < CID_REJECT_TTL);
+    } catch (e) { return []; }
   }
 
-  function stratifiedRangeCids(ctx, salt, count = CID_RANGE_SAMPLE_COUNT) {
-    const random = seededRandom(hashString((criteriaSignature(ctx) || location.pathname) + '|' + salt));
-    const out = [];
-    for (let i = 0; i < count; i++) {
-      const start = Math.max(1, Math.floor(i * CID_RANGE_MAX / count));
-      const end = Math.max(start, Math.floor((i + 1) * CID_RANGE_MAX / count) - 1);
-      out.push(start + Math.floor(random() * (end - start + 1)));
-    }
-    return out;
+  function rejectedCids(ctx) {
+    return new Set(rejectedCidEntries(ctx).map(item => item.cid));
   }
 
-  function neighboringCids(cid) {
+  function rejectCid(cid, ctx) {
     cid = normalizeCid(cid);
-    if (cid === null || cid < 0) return [];
-    return [-1000, -100, -10, -2, -1, 1, 2, 10, 100, 1000]
-      .map(offset => normalizeCid(cid + offset)).filter(v => v !== null);
+    const key = rejectedCidKey(ctx);
+    if (cid === null || !key) return;
+    const entries = rejectedCidEntries(ctx).filter(item => item.cid !== cid);
+    entries.push({ cid, ts: Date.now() });
+    try { sessionStorage.setItem(key, JSON.stringify(entries)); } catch (e) {}
   }
 
-  function buildProbeList(ctx, salt = Math.floor(Date.now() / CID_CACHE_TTL)) {
+  function clearRejectedCids(ctx) {
+    const key = rejectedCidKey(ctx);
+    try { if (key) sessionStorage.removeItem(key); } catch (e) {}
+  }
+
+  function redirectHistoryKey(ctx) {
+    const sig = criteriaSignature(ctx);
+    return sig ? NAME + ':cid-redirects:' + sig : null;
+  }
+
+  function redirectHistory(ctx) {
+    const key = redirectHistoryKey(ctx);
+    if (!key) return [];
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem(key) || '[]');
+      return Array.isArray(parsed) ? parsed.map(normalizeCid).filter(cid => cid !== null) : [];
+    } catch (e) { return []; }
+  }
+
+  function clearRedirectHistory(ctx) {
+    const key = redirectHistoryKey(ctx);
+    try { if (key) sessionStorage.removeItem(key); } catch (e) {}
+  }
+
+  function runtimeCidsFor(ctx) {
+    const sig = criteriaSignature(ctx);
+    return sig && runtimeDiscoveredCids.has(sig) ? [...runtimeDiscoveredCids.get(sig)] : [];
+  }
+
+  function buildProbeList(ctx, options = {}) {
     const cids = new Set();
     const add = value => { value = normalizeCid(value); if (value !== null) cids.add(value); };
     [ctx && ctx.activeCid, currentCid(), capturedLegacyTemplate && capturedLegacyTemplate.cid,
       capturedRoomGridTemplate && capturedRoomGridTemplate.cid].forEach(add);
-    const remembered = rememberedCids().slice(0, 10);
-    remembered.forEach(add);
+    rememberedCids().slice(0, 10).forEach(add);
     visiblePageCids().forEach(add);
-    PROBE_POOL.forEach(add);
-    stratifiedRangeCids(ctx, salt).forEach(add);
-    [1844104, ...remembered.slice(0, 2)].flatMap(neighboringCids).forEach(add);
-    return [...cids].slice(0, CID_MAX_CANDIDATES);
+    runtimeCidsFor(ctx).forEach(add);
+    ACTIVE_CIDS.forEach(add);
+    if (options.deep) PUBLIC_OBSERVED_CIDS.forEach(add);
+    const rejected = rejectedCids(ctx);
+    const baseline = normalizeCid(ctx && ctx.activeCid);
+    return [...cids].filter(cid => cid === baseline || !rejected.has(cid));
+  }
+
+  async function waitForCidRequestSlot() {
+    while (true) {
+      const now = Date.now();
+      const slot = Math.max(now, cidNextRequestAt, cidBackoffUntil);
+      cidNextRequestAt = slot + CID_REQUEST_INTERVAL + Math.floor(Math.random() * 50);
+      if (slot > now) await sleep(slot - now);
+      if (cidBackoffUntil > slot) continue;
+      return;
+    }
   }
 
   async function fetchJson(url, init = {}, attempts = 2) {
@@ -407,9 +673,7 @@
     if (!fetcher) throw new Error('fetch unavailable');
     let lastError = null;
     for (let attempt = 0; attempt < attempts; attempt++) {
-      const slot = Math.max(Date.now(), cidNextRequestAt);
-      cidNextRequestAt = slot + CID_REQUEST_INTERVAL + Math.floor(Math.random() * 50);
-      if (slot > Date.now()) await sleep(slot - Date.now());
+      await waitForCidRequestSlot();
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), CID_REQUEST_TIMEOUT);
       try {
@@ -417,12 +681,26 @@
         if (!r.ok) {
           const error = new Error('HTTP ' + r.status);
           error.status = r.status;
+          if (r.status === 429 || (r.status >= 500 && r.status <= 599)) {
+            const retryHeader = r.headers && r.headers.get('Retry-After');
+            const retrySeconds = typeof retryHeader === 'string' && /^\d+(?:\.\d+)?$/.test(retryHeader.trim())
+              ? Number(retryHeader) : NaN;
+            const retryDate = retryHeader && !Number.isFinite(retrySeconds) ? Date.parse(retryHeader) : NaN;
+            const waitMs = Number.isFinite(retrySeconds) ? retrySeconds * 1000
+              : (Number.isFinite(retryDate) ? Math.max(0, retryDate - Date.now()) : 1200 * (2 ** attempt));
+            error.retryAfter = Math.min(30000, Math.max(750, waitMs));
+            cidBackoffUntil = Math.max(cidBackoffUntil, Date.now() + error.retryAfter);
+            cidStatus = Object.assign({}, cidStatus, { backoffUntil: cidBackoffUntil, lastHttpStatus: r.status });
+          }
           throw error;
         }
         return await r.json();
       } catch (e) {
         lastError = e;
-        if (attempt + 1 < attempts) await sleep(500 * (attempt + 1) + Math.random() * 300);
+        if (attempt + 1 < attempts) {
+          const waitMs = e.retryAfter || (500 * (attempt + 1) + Math.random() * 300);
+          await sleep(waitMs);
+        }
       } finally { clearTimeout(timer); }
     }
     throw lastError || new Error('request failed');
@@ -444,15 +722,87 @@
     return Number.isFinite(n) && n > 0 ? n : null;
   }
 
-  function extractModernTotal(j) {
+  function inspectOccupancyMetadata(node, options = {}) {
+    const adultCounts = [];
+    const maxAdultCounts = [];
+    const maxOccupancies = [];
+    const guestsWithoutRoom = [];
+    const seen = new Set();
+    let visited = 0;
+
+    const addNumber = (bucket, value) => {
+      const match = String(value ?? '').match(/\d+/);
+      const amount = match ? Number(match[0]) : NaN;
+      if (Number.isInteger(amount) && amount >= 0) bucket.push(amount);
+    };
+    const scanText = text => {
+      const patterns = [
+        [/data-adults\s*=\s*["']?(\d+)/ig, adultCounts],
+        [/\bfor\s+(\d+)\s+(?:person|people|adults?|guests?)\b/ig, adultCounts],
+        [/\bMAX[_\s-]*OCCUPANCY\b[^\d]{0,24}(\d+)/ig, maxOccupancies],
+        [/(\d+)[^\d]{0,24}\bMAX[_\s-]*OCCUPANCY\b/ig, maxOccupancies]
+      ];
+      for (const [pattern, bucket] of patterns) {
+        let match;
+        while ((match = pattern.exec(text))) addNumber(bucket, match[1]);
+      }
+    };
+    const visit = (value, key = '', depth = 0) => {
+      if (value === null || value === undefined || depth > 6 || visited++ > 500) return;
+      const compactKey = String(key).replace(/[^a-z]/gi, '').toLowerCase();
+      if (options.skipOffers && compactKey === 'offers') return;
+      if (typeof value !== 'object') {
+        const text = String(value);
+        scanText(String(key));
+        scanText(text);
+        if (compactKey === 'dataadults') {
+          addNumber(adultCounts, value);
+        }
+        if (['maxadults', 'maxallowedadults'].includes(compactKey)) {
+          addNumber(maxAdultCounts, value);
+        }
+        if (['maxoccupancy', 'maximumoccupancy', 'maxguests', 'maxguest', 'capacity'].includes(compactKey)) {
+          addNumber(maxOccupancies, value);
+        }
+        if (compactKey === 'numberofguestswithoutroom') addNumber(guestsWithoutRoom, value);
+        return;
+      }
+      if (seen.has(value)) return;
+      seen.add(value);
+      if (Array.isArray(value)) value.forEach(item => visit(item, key, depth + 1));
+      else Object.entries(value).forEach(([childKey, child]) => visit(child, childKey, depth + 1));
+    };
+
+    visit(node);
+    return { adultCounts, maxAdultCounts, maxOccupancies, guestsWithoutRoom };
+  }
+
+  function occupancyAllows(node, requiredAdults, options = {}) {
+    if (!node || typeof node !== 'object') return true;
+    if (node.isOccupancyExceeded === true || node.isSoldOut === true) return false;
+    const metadata = inspectOccupancyMetadata(node, options);
+    if (metadata.guestsWithoutRoom.some(value => value > 0)) return false;
+    if (metadata.adultCounts.length && Math.max(...metadata.adultCounts) < requiredAdults) return false;
+    if (metadata.maxAdultCounts.length && Math.max(...metadata.maxAdultCounts) < requiredAdults) return false;
+    if (metadata.maxOccupancies.length && Math.max(...metadata.maxOccupancies) < requiredAdults) return false;
+    return true;
+  }
+
+  function extractModernTotal(j, ctx = {}) {
     const values = [];
-    for (const room of (j && j.rooms || [])) {
-      if (room.isOccupancyExceeded === true) continue;
-      for (const offer of (room.offers || [])) {
+    const roomCount = Math.max(1, Number(ctx.rooms) || 1);
+    const requiredAdults = Math.max(1, Math.ceil((Number(ctx.adults) || 2) / roomCount));
+    const rooms = Array.isArray(j && j.rooms) ? j.rooms : null;
+    if (rooms) for (const room of rooms) {
+      const offers = Array.isArray(room && room.offers) ? room.offers : [];
+      if (!occupancyAllows(room, requiredAdults, { skipOffers: true })) continue;
+      for (const offer of offers) {
+        if (!occupancyAllows(offer, requiredAdults)) continue;
         const v = numericAmount(offer.analyticsContext && offer.analyticsContext.hotel_price_per_book);
         if (v !== null) values.push(v);
       }
     }
+    if (rooms) return values.length ? Math.min(...values) : null;
     const cheapest = numericAmount(j && j.cheapestPrice && j.cheapestPrice.analyticsContext && j.cheapestPrice.analyticsContext.hotel_price_per_book);
     if (cheapest !== null) values.push(cheapest);
     return values.length ? Math.min(...values) : null;
@@ -467,7 +817,6 @@
         if (room.isFit === false || (occupancy && occupancy < adults) || Number(room.availability) === 0) continue;
         const candidates = [
           room.pricing && room.pricing.displaySummary && room.pricing.displaySummary.perBook && room.pricing.displaySummary.perBook.displayTotal && room.pricing.displaySummary.perBook.displayTotal.allInclusive,
-          room.paymentOption && room.paymentOption.amountPayNow,
           room.totalPrice && room.totalPrice.display,
           room.inclusivePrice
         ];
@@ -478,30 +827,69 @@
     return values.length ? Math.min(...values) : null;
   }
 
-  function modernProbeHeaders(template, cid) {
+  function probeUrlForCid(rawUrl, cid) {
+    const u = new URL(rawUrl, location.href);
+    u.searchParams.delete('tag');
+    u.searchParams.delete('ds');
+    u.searchParams.set('cid', String(cid));
+    if (CID_TAGS[cid]) u.searchParams.set('tag', CID_TAGS[cid]);
+    return u.pathname + u.search;
+  }
+
+  function modernProbeUrlForCid(rawUrl, cid) {
+    const u = new URL(rawUrl, location.href);
+    u.searchParams.delete('cid');
+    u.searchParams.delete('tag');
+    u.searchParams.delete('ds');
+    if (CID_TAGS[cid]) u.searchParams.set('tag', CID_TAGS[cid]);
+    return u.pathname + u.search;
+  }
+
+  function modernProbeHeaders(template, cid, probeUrl = template.url) {
     const headers = Object.assign({}, template.headers, { 'ag-cid': String(cid), 'content-type': 'application/json' });
     const uid = headers['ag-user-id'];
-    try { if (uid) headers['x-gate-meta'] = btoa(`${Date.now()}|${uid}|${new URL(template.url, location.href).pathname}`); }
+    try { if (uid) headers['x-gate-meta'] = btoa(`${Date.now()}|${uid}|${new URL(probeUrl, location.href).pathname}`); }
     catch (e) {}
     return headers;
   }
 
-  async function probeModernCid(cid, ctx) {
-    const t = capturedRoomGridTemplate;
+  function createProbeSession(source, ctx) {
+    const modern = capturedRoomGridTemplate && String(capturedRoomGridTemplate.hotelId) === String(ctx.hotelId)
+      ? {
+          url: capturedRoomGridTemplate.url,
+          body: JSON.parse(JSON.stringify(capturedRoomGridTemplate.body)),
+          headers: Object.assign({}, capturedRoomGridTemplate.headers),
+          hotelId: String(capturedRoomGridTemplate.hotelId)
+        }
+      : null;
+    const legacy = capturedLegacyTemplate && String(capturedLegacyTemplate.hotelId) === String(ctx.hotelId)
+      ? Object.assign({}, capturedLegacyTemplate)
+      : null;
+    const selected = source === 'room-grid' ? modern : legacy;
+    return Object.freeze({
+      source, ctx: Object.freeze(Object.assign({}, ctx)), modernTemplate: modern, legacyTemplate: legacy,
+      fingerprint: templateFingerprint(source, selected, ctx)
+    });
+  }
+
+  async function probeModernCid(cid, ctx, session) {
+    const t = session && session.modernTemplate;
     if (!t || String(t.hotelId) !== String(ctx.hotelId)) return { total: null, ok: false, status: 0 };
     try {
-      const j = await fetchJson(t.url, {
-        method: 'POST', headers: modernProbeHeaders(t, cid),
+      const probeUrl = modernProbeUrlForCid(t.url, cid);
+      const j = await fetchJson(probeUrl, {
+        method: 'POST', headers: modernProbeHeaders(t, cid, probeUrl),
         body: JSON.stringify(t.body)
       });
-      return { total: extractModernTotal(j), ok: true, status: 200 };
+      return { total: extractModernTotal(j, ctx), ok: true, status: 200 };
     } catch (e) { return { total: null, ok: false, status: e.status || 0 }; }
   }
 
-  function legacyProbeUrl(cid, ctx) {
+  function legacyProbeUrl(cid, ctx, session) {
     let u;
-    if (capturedLegacyTemplate && String(capturedLegacyTemplate.hotelId) === String(ctx.hotelId)) {
-      u = new URL(capturedLegacyTemplate.url, location.href);
+    const legacy = session && session.legacyTemplate;
+    if (legacy && String(legacy.hotelId) === String(ctx.hotelId)) {
+      u = new URL(legacy.url, location.href);
     } else {
       u = new URL('/api/cronos/property/BelowFoldParams/GetSecondaryData', location.href);
       const q = u.searchParams;
@@ -509,25 +897,30 @@
       if (ctx.checkOut) q.set('checkOut', ctx.checkOut);
       q.set('los', ctx.los || '1'); q.set('rooms', ctx.rooms || '1');
       q.set('adults', ctx.adults || '2'); q.set('children', ctx.children || '0');
+      if (ctx.childrenAges) q.set('childages', ctx.childrenAges);
       if (ctx.curr && !/^\d+$/.test(ctx.curr)) q.set('curr', ctx.curr);
       q.set('hotel_id', ctx.hotelId); q.set('all', 'false');
       q.set('isHostPropertiesEnabled', 'true'); q.set('price_view', '0');
       q.set('sessionid', 'x'); q.set('pagetypeid', '7'); q.set('attributionInfos', '32|-1');
     }
-    u.searchParams.set('cid', String(cid));
-    return u.pathname + u.search;
+    return probeUrlForCid(u.pathname + u.search, cid);
   }
 
-  async function probeLegacyCid(cid, ctx) {
+  async function probeLegacyCid(cid, ctx, session) {
     try {
-      const j = await fetchJson(legacyProbeUrl(cid, ctx), { headers: { accept: 'application/json' } });
+      const j = await fetchJson(legacyProbeUrl(cid, ctx, session), { headers: { accept: 'application/json' } });
       return { total: extractLegacyTotal(j, ctx), ok: true, status: 200 };
     } catch (e) { return { total: null, ok: false, status: e.status || 0 }; }
   }
 
-  async function runCidSweep(list, source, ctx, onProgress) {
+  function probeCid(cid, source, ctx, session) {
+    return source === 'room-grid' ? probeModernCid(cid, ctx, session) : probeLegacyCid(cid, ctx, session);
+  }
+
+  async function runCidSweep(list, source, ctx, session, onProgress) {
     const results = new Map();
-    const stats = { attempted: 0, ok: 0, noPrice: 0, httpErrors: 0, stopped: false };
+    const unresolved = new Set(list);
+    const stats = { attempted: 0, ok: 0, noPrice: 0, httpErrors: 0, stopped: false, unresolvedCids: [] };
     let next = 0, done = 0, consecutiveErrors = 0;
     const worker = async () => {
       while (true) {
@@ -535,12 +928,13 @@
         const index = next++;
         if (index >= list.length) return;
         const cid = list[index];
-        const outcome = source === 'room-grid' ? await probeModernCid(cid, ctx) : await probeLegacyCid(cid, ctx);
+        const outcome = await probeCid(cid, source, ctx, session);
         const total = outcome.total;
         stats.attempted++;
         if (outcome.ok) {
           stats.ok++;
           consecutiveErrors = 0;
+          unresolved.delete(cid);
           if (total === null) stats.noPrice++;
         } else {
           stats.httpErrors++;
@@ -554,41 +948,178 @@
       }
     };
     await Promise.all(Array.from({ length: Math.min(CID_CONCURRENCY, list.length) }, () => worker()));
+    stats.unresolvedCids = [...unresolved];
     return { results, stats };
   }
 
-  async function verifyCidCandidates(results, source, ctx, activeCid) {
-    const ranked = [...results.entries()].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
-    const candidates = [];
-    [activeCid, ...ranked.slice(0, 3).map(x => x[0])].forEach(cid => {
-      if (!candidates.includes(cid)) candidates.push(cid);
-    });
-    const samples = new Map(candidates.map(cid => [cid, []]));
-    const total = candidates.length * CID_VERIFY_ROUNDS;
-    let done = 0;
-    cidStatus = { phase: 'verifying', done: 0, total, source };
-    notify(`최저 후보 재검증 — ${candidates.length}개 × ${CID_VERIFY_ROUNDS}회`);
-    for (let round = 0; round < CID_VERIFY_ROUNDS; round++) {
-      for (const cid of candidates) {
-        const outcome = source === 'room-grid' ? await probeModernCid(cid, ctx) : await probeLegacyCid(cid, ctx);
-        done++;
-        cidStatus = { phase: 'verifying', done, total, source };
-        if (!outcome.ok || outcome.total === null) return null;
-        samples.get(cid).push(outcome.total);
+  async function runCidSweepWithRetries(list, source, ctx, session, onProgress, maxPasses = 3) {
+    const results = new Map();
+    let pending = list.slice();
+    let totalHttpErrors = 0;
+    for (let pass = 0; pass < maxPasses && pending.length; pass++) {
+      if (pass > 0) {
+        notify(`응답 누락 CID ${pending.length}개만 재시도 (${pass + 1}/${maxPasses})`);
+        await sleep(Math.min(4000, 750 * pass));
       }
+      const sweep = await runCidSweep(pending, source, ctx, session, onProgress);
+      sweep.results.forEach((total, cid) => results.set(cid, total));
+      totalHttpErrors += sweep.stats.httpErrors;
+      pending = sweep.stats.unresolvedCids;
     }
-    const verified = new Map();
-    for (const [cid, values] of samples) {
-      if (values.length !== CID_VERIFY_ROUNDS) return null;
-      verified.set(cid, values.reduce((sum, value) => sum + value, 0) / values.length);
-    }
-    return verified;
+    return {
+      results,
+      stats: {
+        complete: pending.length === 0,
+        resolvedCount: list.length - pending.length,
+        unresolvedCids: pending,
+        httpErrors: totalHttpErrors,
+        stopped: pending.length > 0
+      }
+    };
   }
 
-  async function waitForProbeContext() {
+  function stableMedianTotal(values) {
+    const sorted = (Array.isArray(values) ? values : [])
+      .filter(value => Number.isFinite(value) && value > 0).slice().sort((a, b) => a - b);
+    if (sorted.length < 2) return null;
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const tolerance = Math.max(0.01, median * 0.005);
+    const stable = sorted.filter(value => Math.abs(value - median) <= tolerance);
+    return stable.length >= 2 ? stable[Math.floor(stable.length / 2)] : null;
+  }
+
+  function verificationBlockerCids(results, verified, rejected, bestTotal, epsilon) {
+    return [...results.entries()]
+      .filter(([cid, total]) => !rejected.has(cid) && !verified.has(cid) && total < bestTotal - epsilon)
+      .map(([cid]) => cid);
+  }
+
+  function verificationCandidateCids(results, activeCid) {
+    const ranked = [...results.entries()]
+      .sort((a, b) => a[1] - b[1] || a[0] - b[0])
+      .map(([cid]) => cid);
+    const prioritized = [...new Set([activeCid, ...ranked])];
+    return [prioritized[0], ...prioritized.slice(1, CID_VERIFY_MAX_CANDIDATES + 1)];
+  }
+
+  async function verifyCidCandidates(results, source, ctx, activeCid, session) {
+    const candidates = verificationCandidateCids(results, activeCid);
+    const verified = new Map();
+    const attempted = new Set();
+    let done = 0;
+    const total = candidates.length * CID_VERIFY_ROUNDS;
+
+    const verifyOne = async cid => {
+      if (attempted.has(cid)) return;
+      attempted.add(cid);
+      cidStatus = { phase: 'verifying', done, total, source };
+      const values = results.has(cid) ? [results.get(cid)] : [];
+      for (let round = 0; round < CID_VERIFY_ROUNDS; round++) {
+        const outcome = await probeCid(cid, source, ctx, session);
+        done++;
+        cidStatus = { phase: 'verifying', done, total, source };
+        if (outcome.ok && outcome.total !== null) values.push(outcome.total);
+      }
+      const stable = stableMedianTotal(values);
+      if (stable !== null) verified.set(cid, stable);
+    };
+
+    notify(`현재 CID와 최저 후보 교차검증 — 최대 ${CID_VERIFY_MAX_CANDIDATES}개`);
+    for (let index = 0; index < candidates.length; index += CID_VERIFY_TOP) {
+      const batch = candidates.slice(index, index + CID_VERIFY_TOP);
+      await Promise.all(batch.map(cid => verifyOne(cid)));
+    }
+    return {
+      verified,
+      attempted: [...attempted],
+      failedCids: [...attempted].filter(cid => !verified.has(cid)),
+      exhausted: candidates.length >= new Set([activeCid, ...results.keys()]).size
+    };
+  }
+
+  function pendingCidToken(ctx) {
+    try {
+      const token = JSON.parse(sessionStorage.getItem(CID_FIXED_FLAG) || 'null');
+      if (!token || token.pending !== true || !token.ts || Date.now() - token.ts > 5 * 60 * 1000) return null;
+      if (ctx && token.sig !== criteriaSignature(ctx)) return null;
+      return token;
+    } catch (e) { return null; }
+  }
+
+  async function waitForNaturalObservation(ctx, cid, since, session, timeout = CID_NATURAL_RESPONSE_TIMEOUT) {
+    const signature = criteriaSignature(ctx);
+    const deadline = Date.now() + timeout;
+    while (Date.now() <= deadline) {
+      for (let i = naturalPriceObservations.length - 1; i >= 0; i--) {
+        const item = naturalPriceObservations[i];
+        if (item.signature === signature && item.cid === cid && item.observedAt >= since &&
+            item.kind === session.source && item.fingerprint === session.fingerprint) return item;
+      }
+      await sleep(250);
+    }
+    return null;
+  }
+
+  function failPendingCid(token, ctx, message) {
+    rejectCid(token.cid, ctx);
+    clearCidCache(ctx);
+    try { sessionStorage.removeItem(CID_FIXED_FLAG); } catch (e) {}
+    notify(message);
+    const rollbackCid = normalizeCid(token.fromCid);
+    if (!token.rollback && rollbackCid !== null && rollbackCid !== normalizeCid(token.cid)) {
+      if (redirectToCid(rollbackCid, token.cid, ctx, null, { rollback: true })) return 'redirected';
+    }
+    return 'rescan';
+  }
+
+  async function confirmPendingCid(ctx, source, session) {
+    const token = pendingCidToken(ctx);
+    if (!token) return null;
+    const naturalCid = normalizeCid(ctx.activeCid);
+    if (naturalCid !== normalizeCid(token.cid)) {
+      return failPendingCid(token, ctx,
+        `적용 확인 실패 — 요청 CID가 ${naturalCid ?? '없음'}으로 응답해 ${token.cid} 제외`);
+    }
+    const natural = await waitForNaturalObservation(ctx, token.cid, token.ts, session);
+    const values = natural && natural.total !== null ? [natural.total] : [];
+    for (let round = 0; round < CID_VERIFY_ROUNDS; round++) {
+      const outcome = await probeCid(token.cid, source, ctx, session);
+      if (outcome.ok && outcome.total !== null) values.push(outcome.total);
+    }
+    const appliedTotal = stableMedianTotal(values);
+    const expected = Number.isFinite(token.expectedTotal) && token.expectedTotal > 0 ? token.expectedTotal : null;
+    const tolerance = expected !== null ? Math.max(0.01, expected * 0.01) : Infinity;
+    const naturalTolerance = appliedTotal !== null ? Math.max(0.01, appliedTotal * 0.005) : 0;
+    if (!natural || appliedTotal === null || natural.total > appliedTotal + naturalTolerance || (expected !== null &&
+        (natural.total > expected + tolerance || appliedTotal > expected + tolerance))) {
+      return failPendingCid(token, ctx,
+        `적용 후 실제 가격 확인 실패 — cid ${token.cid}를 이번 검색에서 제외하고 원래 채널로 복귀해`);
+    }
+    const cached = getCidCache(ctx);
+    if (cached && cached.bestCid === token.cid) {
+      setCidCache(Object.assign({}, cached, {
+        confirmedCid: token.cid, appliedAt: Date.now(), appliedTotal,
+        verifiedAt: Date.now()
+      }), ctx);
+    }
+    try { sessionStorage.removeItem(CID_FIXED_FLAG); } catch (e) {}
+    clearRedirectHistory(ctx);
+    if (token.rollback) {
+      cidStatus = { phase: 'rollback', done: 1, total: 1, source };
+      notify(`원래 cid ${token.cid} 복귀 확인 — 실패 채널을 제외하고 다시 비교해`);
+      return 'rollback-confirmed';
+    }
+    rememberCid(token.cid);
+    cidStatus = { phase: 'applied', done: 1, total: 1, source };
+    notify(`cid ${token.cid} 실제 페이지 적용 확인 — ${formatNum(appliedTotal)}`);
+    return 'confirmed';
+  }
+
+  async function waitForProbeContext(requireCaptured = false) {
     for (let i = 0; i < 30; i++) {
       const ctx = probeContext();
-      if (ctx && ctx.hotelId && ctx.checkIn) return ctx;
+      const captured = !!(capturedRoomGridTemplate || capturedLegacyTemplate);
+      if (ctx && ctx.hotelId && ctx.checkIn && (!requireCaptured || captured)) return ctx;
       await sleep(400);
     }
     return probeContext();
@@ -596,66 +1127,116 @@
 
   async function ensureCheapCid(options = {}) {
     if (!settings.cidFix || !isPropertyPage()) return;
-    if (cidSweepPromise) return cidSweepPromise;
+    if (cidSweepPromise) {
+      const nextSignature = criteriaSignature();
+      if (options.force || (nextSignature && nextSignature !== cidSweepSignature)) {
+        cidSweepQueued = {
+          force: !!(options.force || cidSweepQueued && cidSweepQueued.force),
+          deep: !!(options.deep || cidSweepQueued && cidSweepQueued.deep)
+        };
+      }
+      return cidSweepPromise;
+    }
     cidSweepPromise = (async () => {
-      const ctx = await waitForProbeContext();
+      const hadPending = !!pendingCidToken();
+      const ctx = await waitForProbeContext(hadPending);
       if (!ctx || !ctx.hotelId || !ctx.checkIn) {
         notify('cid 검색 실패 — 호텔/날짜 정보를 불러오지 못했어');
         return;
       }
       const startSignature = criteriaSignature(ctx);
+      cidSweepSignature = startSignature;
       if (options.force) {
         clearCidCache(ctx);
+        clearRejectedCids(ctx);
+        clearRedirectHistory(ctx);
         try { sessionStorage.removeItem(CID_FIXED_FLAG); } catch (e) {}
       }
-      const cached = options.force ? null : getCidCache(ctx);
+      let source = capturedRoomGridTemplate && String(capturedRoomGridTemplate.hotelId) === String(ctx.hotelId) ? 'room-grid' : 'secondary';
+      let session = createProbeSession(source, ctx);
+      if (!options.force && hadPending) {
+        const pendingResult = await confirmPendingCid(ctx, source, session);
+        if (pendingResult === 'confirmed' || pendingResult === 'redirected') return;
+      }
       const activeCid = normalizeCid(ctx.activeCid) ?? DEFAULT_CID;
+      let cached = options.force ? null : getCidCache(ctx);
+      if (cached) {
+        const knownCids = [cached.baselineCid, cached.bestCid, cached.confirmedCid]
+          .map(normalizeCid).filter(cid => cid !== null);
+        if (!knownCids.includes(activeCid)) {
+          clearCidCache(ctx);
+          cached = null;
+          notify(`새 유입 cid ${activeCid}는 기존 캐시 기준 밖이라 전체 가격을 다시 비교해`);
+        }
+      }
       if (cached && cached.bestCid !== undefined) {
         cidStatus = { phase: 'cached', done: cached.validCount || 0, total: cached.candidateCount || 0, source: cached.source };
-        if (cached.bestCid === null || cached.bestCid === activeCid) return;
+        if (cached.bestCid === null && cached.baselineCid === activeCid) return;
+        if (cached.confirmedCid === activeCid) return;
+        if (cached.bestCid === activeCid) {
+          clearCidCache(ctx);
+          cached = null;
+          notify(`cid ${activeCid}의 적용 확인 기록이 없어 다시 검증해`);
+        }
+      }
+      if (cached && cached.bestCid !== undefined) {
+        if (cached.baselineCid !== activeCid) {
+          clearCidCache(ctx);
+          cached = null;
+        }
+      }
+      if (cached && cached.bestCid !== null) {
         notify(`저장된 최저 cid ${cached.bestCid} 적용`);
-        redirectToCid(cached.bestCid, activeCid, ctx);
+        if (!redirectToCid(cached.bestCid, activeCid, ctx, cached.bestTotal)) {
+          clearCidCache(ctx);
+          cidStatus = { phase: 'loop-blocked', done: 0, total: 0, source: cached.source };
+        }
         return;
       }
 
-      const list = buildProbeList(ctx, options.force ? Date.now() : undefined);
-      let source = capturedRoomGridTemplate && String(capturedRoomGridTemplate.hotelId) === String(ctx.hotelId) ? 'room-grid' : 'secondary';
-      notify(`저가 채널(cid) 검색 시작 — ${list.length}개, ${source === 'room-grid' ? '최신 API' : '호환 API'}`);
-      let sweep = await runCidSweep(list, source, ctx, (done, total) => {
+      const list = buildProbeList(ctx, { deep: !!options.deep });
+      notify(`${options.deep ? '공개 CID 전체 감사' : '현행 실사용 CID 비교'} 시작 — ${list.length}개, ${source === 'room-grid' ? '최신 API' : '호환 API'}`);
+      let sweep = await runCidSweepWithRetries(list, source, ctx, session, (done, total) => {
         if (done % 20 === 0 || done === total) notify(`cid 검색 ${done}/${total}...`);
       });
       let results = sweep.results;
-      let completed = sweep.stats.attempted === list.length && !sweep.stats.stopped;
+      let completed = sweep.stats.complete;
+      let unresolvedCids = sweep.stats.unresolvedCids.slice();
 
       const minimumValid = Math.max(3, Math.ceil(list.length * 0.15));
-      if (source === 'room-grid' && (!completed || results.size < minimumValid || !results.has(activeCid))) {
+      const severeModernGap = unresolvedCids.length > Math.max(3, Math.ceil(list.length * 0.1));
+      if (source === 'room-grid' && (severeModernGap || results.size < minimumValid || !results.has(activeCid))) {
         notify('최신 API 응답이 부족해 호환 API를 소수 표본으로 확인 중...');
-        const sampleList = [...new Set([activeCid, DEFAULT_CID, 2, 10000, 16100, 48000, ...rememberedCids()])]
-          .filter(cid => normalizeCid(cid) !== null).slice(0, 8);
+        const sampleList = [...new Set([activeCid, DEFAULT_CID, ...rememberedCids(), ...ACTIVE_HIGH_CIDS.slice(0, 6)])]
+          .filter(cid => normalizeCid(cid) !== null && (cid === activeCid || !rejectedCids(ctx).has(cid))).slice(0, 10);
         source = 'secondary';
-        const sampleSweep = await runCidSweep(sampleList, source, ctx, (done, total) => {
+        session = createProbeSession(source, ctx);
+        const sampleSweep = await runCidSweepWithRetries(sampleList, source, ctx, session, (done, total) => {
           if (done === total) notify(`호환 표본 ${done}/${total} 확인`);
         });
-        if (sampleSweep.results.size >= 2 && sampleSweep.results.has(activeCid) && !sampleSweep.stats.stopped) {
+        if (sampleSweep.results.size >= 2 && sampleSweep.results.has(activeCid) && sampleSweep.stats.complete) {
           const sampled = new Set(sampleList);
           const remaining = list.filter(cid => !sampled.has(cid));
           notify('호환 API 표본 정상 — 전체 후보 확인 중...');
-          const restSweep = await runCidSweep(remaining, source, ctx, (done, total) => {
+          const restSweep = await runCidSweepWithRetries(remaining, source, ctx, session, (done, total) => {
             if (done % 20 === 0 || done === total) notify(`호환 검색 ${done}/${total}...`);
           });
           results = new Map([...sampleSweep.results, ...restSweep.results]);
-          completed = sampleSweep.stats.attempted === sampleList.length &&
-            restSweep.stats.attempted === remaining.length && !restSweep.stats.stopped;
+          completed = sampleSweep.stats.complete && restSweep.stats.complete;
+          unresolvedCids = [...sampleSweep.stats.unresolvedCids, ...restSweep.stats.unresolvedCids];
         } else {
           results = sampleSweep.results;
           completed = false;
+          const sampled = new Set(sampleList);
+          unresolvedCids = [...sampleSweep.stats.unresolvedCids, ...list.filter(cid => !sampled.has(cid))];
         }
       }
 
       const scannedBaselineTotal = results.get(activeCid);
-      if (!completed || results.size < 2 || scannedBaselineTotal === undefined) {
+      const coverage = list.length ? (list.length - unresolvedCids.length) / list.length : 0;
+      if (results.size < 2 || scannedBaselineTotal === undefined || coverage < 0.8) {
         cidStatus = { phase: 'error', done: results.size, total: list.length, source };
-        notify(`cid 검색 중단 — 서버 제한 또는 유효 응답 부족 (${results.size}/${list.length}), 잠시 후 다시 검색해줘`);
+        notify(`cid 검색 중단 — ${unresolvedCids.length}개 응답 누락 또는 유효 가격 부족 (${results.size}/${list.length}), 잠시 후 다시 검색해줘`);
         return;
       }
       if (criteriaSignature() !== startSignature) {
@@ -663,10 +1244,11 @@
         return;
       }
 
-      const verified = await verifyCidCandidates(results, source, ctx, activeCid);
-      if (!verified || !verified.has(activeCid)) {
+      const verification = await verifyCidCandidates(results, source, ctx, activeCid, session);
+      const verified = verification.verified;
+      if (!verified.has(activeCid) || verified.size < 1) {
         cidStatus = { phase: 'error', done: results.size, total: list.length, source };
-        notify('최저 후보 재검증 실패 — 가격이 안정된 뒤 다시 검색해줘');
+        notify('기준 CID 교차검증 실패 — 성공한 다른 후보 결과는 폐기하고 잠시 뒤 재시도해');
         return;
       }
       if (criteriaSignature() !== startSignature) {
@@ -675,57 +1257,107 @@
       }
 
       const baselineTotal = verified.get(activeCid);
-      let bestCid = activeCid, bestTotal = baselineTotal;
+      const rejected = rejectedCids(ctx);
+      const activeRejected = rejected.has(activeCid);
+      let bestCid = activeRejected ? null : activeCid;
+      let bestTotal = activeRejected ? Infinity : baselineTotal;
       for (const [cid, total] of verified) {
+        if (rejected.has(cid)) continue;
         if (total < bestTotal) { bestCid = cid; bestTotal = total; }
       }
-      const priceKeys = new Set([...verified.values()].map(v => Number(v).toFixed(4)));
+      if (bestCid === null) {
+        cidStatus = { phase: 'error', done: results.size, total: list.length, source };
+        notify('적용 확인에 실패한 현재 CID 외에 안정적인 대체 후보를 찾지 못했어');
+        return;
+      }
       const epsilon = Math.max(0.01, baselineTotal * 0.0001);
-      const isBetter = bestTotal < baselineTotal - epsilon;
-      const noDifference = priceKeys.size === 1;
+      const verificationBlockers = verificationBlockerCids(results, verified, rejected, bestTotal, epsilon);
+      if (verificationBlockers.length) {
+        cidStatus = { phase: 'verification-blocked', done: verified.size, total: results.size, source };
+        notify(`더 싸게 보인 CID ${verificationBlockers.length}개의 재검증이 불안정해 자동 적용·캐시를 보류해`);
+        return;
+      }
+      const isBetter = activeRejected ? bestCid !== activeCid : bestTotal < baselineTotal - epsilon;
       const cacheData = {
-        cacheVersion: 3,
-        bestCid: noDifference ? null : bestCid, bestTotal, baselineCid: activeCid,
+        cacheVersion: CID_CACHE_VERSION, registryVersion: CID_REGISTRY_VERSION,
+        bestCid: isBetter ? bestCid : null, bestTotal, baselineCid: activeCid,
         baselineTotal, noCheap: !isBetter, source,
+        scanMode: options.deep ? 'public-deep' : 'active',
         validCount: results.size, candidateCount: list.length,
-        verifiedCount: verified.size, verifiedAt: Date.now()
+        verifiedCount: verified.size, verificationFailedCount: verification.failedCids.length,
+        verifiedAt: Date.now(),
+        confirmedCid: isBetter ? null : activeCid,
+        complete: completed, unresolvedCount: unresolvedCids.length,
+        unresolvedCids: unresolvedCids.slice(0, 50),
+        ttlMs: completed ? CID_CACHE_TTL : 5 * 60 * 1000
       };
-      setCidCache(cacheData, ctx);
       cidStatus = { phase: 'done', done: results.size, total: list.length, source };
 
-      if (noDifference) {
-        notify(`cid별 가격 차이 없음 — ${formatNum(bestTotal)} (${results.size}개 확인)`);
-        return;
-      }
       if (!isBetter) {
+        if (!completed) {
+          clearCidCache(ctx);
+          notify(`응답된 ${results.size}개에서는 현재 cid가 최저지만 ${unresolvedCids.length}개 누락 때문에 음성 결과를 저장하지 않아`);
+          return;
+        }
+        setCidCache(cacheData, ctx);
         rememberCid(activeCid);
-        notify(`현재 cid ${activeCid}가 최저 — ${formatNum(baselineTotal)}`);
+        notify(`확인한 ${results.size}개 중 현재 cid ${activeCid}가 최저 — ${formatNum(baselineTotal)}`);
         return;
       }
-      rememberCid(bestCid);
-      const saved = baselineTotal - bestTotal;
-      const percent = baselineTotal > 0 ? saved / baselineTotal * 100 : 0;
-      notify(`검증 최저 cid ${bestCid} 발견 — ${formatNum(bestTotal)} (${formatNum(saved)}, ${percent.toFixed(1)}% 절약)`);
-      redirectToCid(bestCid, activeCid, ctx);
-    })().finally(() => { cidSweepPromise = null; });
+      setCidCache(cacheData, ctx);
+      if (activeRejected) {
+        notify(`실패 CID를 제외한 안전 대체 cid ${bestCid} 발견 — ${formatNum(bestTotal)}`);
+      } else {
+        const saved = baselineTotal - bestTotal;
+        const percent = baselineTotal > 0 ? saved / baselineTotal * 100 : 0;
+        notify(`${completed ? '검증 최저' : '응답 누락 제외 검증 최저'} cid ${bestCid} 발견 — ${formatNum(bestTotal)} (${formatNum(saved)}, ${percent.toFixed(1)}% 절약)`);
+      }
+      if (!redirectToCid(bestCid, activeCid, ctx, bestTotal)) {
+        clearCidCache(ctx);
+        cidStatus = { phase: 'loop-blocked', done: results.size, total: list.length, source };
+      }
+    })().finally(() => {
+      cidSweepPromise = null;
+      cidSweepSignature = null;
+      const queued = cidSweepQueued;
+      cidSweepQueued = null;
+      if (queued) setTimeout(() => ensureCheapCid(queued), 0);
+    });
     return cidSweepPromise;
   }
 
-  function redirectToCid(cid, fromCid, ctx = probeContext()) {
+  function cidDestinationUrl(rawUrl, cid) {
+    const url = new URL(rawUrl, location.href);
+    ['tag', 'ds', 'searchrequestid', 'pcs', 'pslc'].forEach(key => url.searchParams.delete(key));
+    url.searchParams.set('cid', String(cid));
+    if (CID_TAGS[cid]) url.searchParams.set('tag', CID_TAGS[cid]);
+    return url.toString();
+  }
+
+  function redirectToCid(cid, fromCid, ctx = probeContext(), expectedTotal = null, options = {}) {
     try {
       const sig = criteriaSignature(ctx) || location.pathname;
-      const token = { sig, cid, ts: Date.now() };
+      const token = { sig, cid, fromCid, expectedTotal, pending: true, rollback: !!options.rollback, ts: Date.now() };
       const oldRaw = sessionStorage.getItem(CID_FIXED_FLAG);
       const old = oldRaw ? JSON.parse(oldRaw) : null;
-      if (old && old.sig === sig && old.cid === cid && Date.now() - old.ts < 3 * 60 * 1000) {
+      if (old && old.pending && old.sig === sig && old.cid === cid && Date.now() - old.ts < 3 * 60 * 1000) {
         notify('반복 이동을 막았어 — [CID 다시 검색]으로 재시도 가능');
-        return;
+        return false;
       }
-      const url = new URL(location.href);
-      url.searchParams.set('cid', String(cid));
+      const history = redirectHistory(ctx);
+      if (history.includes(cid) || history.length >= CID_REDIRECT_MAX_HOPS) {
+        notify(`CID 반복 이동 차단 — 이번 조건에서 최대 ${CID_REDIRECT_MAX_HOPS}회까지만 적용해`);
+        return false;
+      }
+      const historyKey = redirectHistoryKey(ctx);
+      if (historyKey) sessionStorage.setItem(historyKey, JSON.stringify([...history, cid]));
       sessionStorage.setItem(CID_FIXED_FLAG, JSON.stringify(token));
-      location.replace(url.toString());
-    } catch (e) { notify('cid URL 적용 실패: ' + e.message); }
+      location.replace(cidDestinationUrl(location.href, cid));
+      return true;
+    } catch (e) {
+      notify('cid URL 적용 실패: ' + e.message);
+      return false;
+    }
   }
 
   function nightsFromUrl() {
@@ -1146,7 +1778,7 @@
         </div>
         <div id="nyx-agoda-actions">
           <button id="nyx-agoda-book-now">🎯 최저가 바로 예약</button>
-          <button id="nyx-agoda-cid-rescan">🔎 CID 새 범위 검색</button>
+          <button id="nyx-agoda-cid-rescan">🔎 공개 CID 전체 재검증</button>
           <button id="nyx-agoda-promo-run">🎟 쿠폰 지금 시도</button>
           <button id="nyx-agoda-promo-edit">쿠폰 목록 편집</button>
         </div>
@@ -1209,7 +1841,7 @@
     panel.querySelector('#nyx-agoda-cid-rescan').addEventListener('click', () => {
       if (cidSweepPromise) { notify(`cid 검색 진행 중 ${cidStatus.done}/${cidStatus.total}`); return; }
       clearCidCache();
-      ensureCheapCid({ force: true });
+      ensureCheapCid({ force: true, deep: true });
     });
     panel.querySelector('#nyx-agoda-promo-edit').addEventListener('click', () => {
       const ta = panel.querySelector('#nyx-agoda-promo-list');
@@ -1262,6 +1894,14 @@
       html += `<br><span style="color:#2563eb">CID 검색: ${cidStatus.done}/${cidStatus.total} (${cidStatus.source === 'room-grid' ? '최신 API' : '호환 API'})</span>`;
     } else if (cidStatus.phase === 'verifying') {
       html += `<br><span style="color:#7c3aed">최저 후보 재검증: ${cidStatus.done}/${cidStatus.total}</span>`;
+    } else if (cidStatus.phase === 'applied') {
+      html += '<br><span style="color:#22c55e">CID 적용·가격 확인 완료 ✓</span>';
+    } else if (cidStatus.phase === 'rollback') {
+      html += '<br><span style="color:#f59e0b">실패 CID 제외 후 원래 채널 복귀 ✓</span>';
+    } else if (cidStatus.phase === 'verification-blocked') {
+      html += '<br><span style="color:#dc2626">더 싼 미검증 후보가 있어 자동 적용 보류</span>';
+    } else if (cidStatus.phase === 'loop-blocked') {
+      html += '<br><span style="color:#dc2626">반복 CID 이동 차단</span>';
     } else if (cidStatus.phase === 'error') {
       html += `<br><span style="color:#dc2626">CID 검색 실패 (${cidStatus.done}/${cidStatus.total})</span>`;
     }
@@ -1300,7 +1940,7 @@
     obs.observe(document.body, { childList: true, subtree: true });
     const cidLocationKey = () => {
       const c = urlCriteria();
-      return [location.pathname, c.checkIn, c.checkOut || c.los, c.rooms, c.adults, c.children, c.curr, currentCid() ?? ''].join('|');
+      return [location.pathname, c.checkIn, c.checkOut || c.los, c.rooms, c.adults, c.children, c.childrenAges, c.curr, currentCid() ?? ''].join('|');
     };
     let lastCidNavKey = cidLocationKey();
     setInterval(() => {
@@ -1326,14 +1966,34 @@
     Object.defineProperty(window, '__NYX_AGODA__', {
       configurable: true,
       value: Object.freeze({
-        version: '1.8.0',
+        version: '1.9.0',
         getState: () => ({
           criteria: probeContext(), status: Object.assign({}, cidStatus),
-          cache: getCidCache(), candidateCount: buildProbeList(probeContext()).length,
+          cache: getCidCache(), registryVersion: CID_REGISTRY_VERSION,
+          activeCidCount: ACTIVE_CIDS.length, publicObservedCidCount: PUBLIC_OBSERVED_CIDS.length,
+          candidateCount: buildProbeList(probeContext()).length,
           captured: { roomGrid: !!capturedRoomGridTemplate, secondary: !!capturedLegacyTemplate }
         }),
-        rescanCid: () => ensureCheapCid({ force: true }),
-        clearCidCache: () => clearCidCache()
+        rescanCid: (deep = false) => ensureCheapCid({ force: true, deep }),
+        clearCidCache: () => clearCidCache(),
+        test: Object.freeze({
+          stableMedianTotal,
+          extractModernTotal,
+          verificationCandidateCids: (results, activeCid) => verificationCandidateCids(new Map(results), activeCid),
+          cidDestinationUrl,
+          probeUrlForCid,
+          modernProbeUrlForCid,
+          criteriaSignature,
+          verificationBlockers: (results, verified, rejected, bestTotal, epsilon = 0.01) =>
+            verificationBlockerCids(new Map(results), new Map(verified), new Set(rejected), bestTotal, epsilon),
+          campaignCidsFrom: payload => {
+            const found = new Set();
+            collectCampaignCids(payload, found);
+            return [...found];
+          },
+          activeCids: () => ACTIVE_CIDS.slice(),
+          publicObservedCids: () => PUBLIC_OBSERVED_CIDS.slice()
+        })
       })
     });
   } catch (e) {}

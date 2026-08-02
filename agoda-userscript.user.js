@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.5.2
-// @description  전 세계 아고다 숙소 최저가 도우미 — 2인 유효 최저가 자동 선택(다국어), 1클릭 예약, 세금포함 총액, 쿠폰 자동시도, 가격 변동 감지
+// @version      1.6.0
+// @description  전 세계 아고다 숙소 최저가 도우미 — 2인 유효 최저가 자동 선택(다국어), 저가 채널(cid) 자동 적용, 1클릭 예약, 세금포함 총액, 쿠폰 자동시도, 가격 변동 감지
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
@@ -11,7 +11,7 @@
 // @downloadURL  https://raw.githubusercontent.com/ad2das/agoda-lowest-price/main/agoda-userscript.user.js
 // @homepageURL  https://github.com/ad2das/agoda-lowest-price
 // @supportURL   https://github.com/ad2das/agoda-lowest-price/issues
-// @run-at       document-idle
+// @run-at       document-start
 // @noframes
 // @grant        none
 // ==/UserScript==
@@ -38,6 +38,7 @@
     promoHunt: true,
     currencyAuto: true,
     watchPrice: true,
+    cidFix: true,
     taxFactor: 1.265,
     promoList: [
       'OAWAGODA', 'OAWACTIVITY', 'AWESAMAGODA', 'AGODA2026', 'NEWUSER8',
@@ -50,6 +51,7 @@
   };
   const settings = Object.assign({}, DEFAULTS, store.get('settings', {}));
   const saveSettings = () => store.set('settings', settings);
+  hookCidCapture();
 
   const CURRENCY_SYMBOLS = {
     'US$': 'USD', 'S$': 'SGD', 'HK$': 'HKD', 'A$': 'AUD', 'C$': 'CAD',
@@ -78,6 +80,201 @@
   const TOTAL_RE = /(?:\d+\s*(?:nights?|박(?!당)|泊(?!あ))|(?:총액|total))/i;
   const NOISE_RE = /UserEngagement|Review|breadcrumb|ScreenReaderOnly|StickyNav|이용후기|리뷰|レビュー|후기/i;
   const CELL_FP_RE = /1박당|per\s*night|1泊|총액|total/i;
+
+  const DEFAULT_CID = 10000;
+  const CID_FIXED_FLAG = 'nyx-cid-fixed-from';
+  const CID_CACHE_TTL = 6 * 60 * 60 * 1000;
+
+  const PROBE_POOL = (() => {
+    const pool = new Set();
+    [101, 501, 1000, 5000, 9900].forEach(c => pool.add(c));
+    for (let c = 10000; c <= 98000; c += 2000) pool.add(c);
+    for (let c = 100000; c <= 285000; c += 25000) pool.add(c);
+    [10000, 10400, 11500, 11600, 16100, 16300, 16500, 17200, 17500, 23100, 25200, 25400, 25600, 26000, 27000, 28300, 29300, 31200, 31900, 33200, 36400, 38000, 40400, 41100, 44800, 46300, 48400, 63700, 65000, 66800, 68300, 75000, 78800, 79600, 80400, 82100, 120000, 150000, 190838, 210000, 255000, 285000].forEach(c => pool.add(c));
+    return [...pool];
+  })();
+
+  function currentCid() {
+    const m = location.search.match(/[?&]cid=(\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  function isPropertyPage() {
+    return /\/hotel\/|\/property\//.test(location.pathname);
+  }
+
+  function cidCacheKey() {
+    const m = location.pathname.match(/^\/(?:[a-z]{2}-[a-z]{2}\/)?([^/]+)\/hotel\//) || location.pathname.match(/^\/(?:[a-z]{2}-[a-z]{2}\/)?([^/]+)\/property\//);
+    return m ? 'cid:' + m[1] : null;
+  }
+
+  function getCidCache() {
+    const key = cidCacheKey();
+    if (!key) return null;
+    const c = store.get(key, null);
+    if (!c || !c.ts || Date.now() - c.ts > CID_CACHE_TTL) return null;
+    return c;
+  }
+
+  function setCidCache(data) {
+    const key = cidCacheKey();
+    if (!key) return;
+    store.set(key, Object.assign({ ts: Date.now() }, data));
+  }
+
+  let capturedCidParams = null;
+
+  function captureCidParamsFrom(urlStr) {
+    if (!urlStr || !urlStr.includes('GetSecondaryData')) return;
+    try {
+      const u = new URL(urlStr, location.href);
+      const params = u.searchParams;
+      if (!params.get('hotel_id')) return;
+      capturedCidParams = {
+        checkIn: params.get('checkIn') || '',
+        los: params.get('los') || '1',
+        rooms: params.get('rooms') || '1',
+        adults: params.get('adults') || '2',
+        children: params.get('children') || '0',
+        curr: params.get('curr') || '',
+        hotel_id: params.get('hotel_id')
+      };
+    } catch (e) {}
+  }
+
+  function hookCidCapture() {
+    try {
+      const origFetch = window.fetch;
+      if (origFetch) {
+        window.fetch = function (...args) {
+          captureCidParamsFrom(typeof args[0] === 'string' ? args[0] : args[0] && args[0].url);
+          return origFetch.apply(this, args);
+        };
+      }
+    } catch (e) {}
+    try {
+      const origOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        captureCidParamsFrom(url);
+        return origOpen.apply(this, arguments);
+      };
+    } catch (e) {}
+  }
+
+  function hotelIdFromDom() {
+    try {
+      const m = document.documentElement.innerHTML.match(/"hotelId"\s*:\s*(\d+)/) || document.documentElement.innerHTML.match(/hotel_id=(\d+)/);
+      if (m) return m[1];
+    } catch (e) {}
+    return null;
+  }
+
+  function probeParams() {
+    if (capturedCidParams && capturedCidParams.hotel_id) return capturedCidParams;
+    const hid = hotelIdFromDom();
+    if (hid) {
+      return { checkIn: '', los: '1', rooms: '1', adults: '2', children: '0', curr: '', hotel_id: hid };
+    }
+    return null;
+  }
+
+  async function probeCidTotal(cid) {
+    const p = probeParams();
+    if (!p) return null;
+    const q = [
+      p.checkIn ? 'checkIn=' + p.checkIn : '',
+      'los=' + p.los, 'rooms=' + p.rooms, 'adults=' + p.adults,
+      p.children ? 'children=' + p.children : '',
+      p.curr ? 'curr=' + p.curr : '',
+      'hotel_id=' + p.hotel_id,
+      'all=false&isHostPropertiesEnabled=false&price_view=1&sessionid=x&pagetypeid=7&attributionInfos=32%7C-1&cid=' + cid
+    ].filter(Boolean).join('&');
+    const u = '/api/cronos/property/BelowFoldParams/GetSecondaryData?' + q;
+    for (let t = 0; t < 3; t++) {
+      try {
+        const r = await fetch(u, { headers: { accept: 'application/json' } });
+        if (r.status !== 200) { await sleep(600); continue; }
+        const j = await r.json();
+        let best = null;
+        for (const mr of (j.roomGridData.masterRooms || [])) for (const rm of (mr.rooms || [])) {
+          if (rm.occupancy !== 2) continue;
+          const v = rm.totalPrice && rm.totalPrice.display;
+          if (typeof v === 'number' && (best === null || v < best)) best = v;
+        }
+        return best;
+      } catch (e) { await sleep(600); }
+    }
+    return null;
+  }
+
+  async function runCidSweep(onProgress) {
+    const cids = new Set(PROBE_POOL);
+    const cur = currentCid();
+    if (cur !== null) cids.add(cur);
+    cids.add(2);
+    const list = [...cids];
+    const results = new Map();
+    let done = 0;
+    const worker = async (items) => {
+      for (const cid of items) {
+        const total = await probeCidTotal(cid);
+        if (total !== null) results.set(cid, total);
+        done++;
+        if (onProgress) onProgress(done, list.length, cid, total);
+      }
+    };
+    const chunks = [];
+    for (let i = 0; i < list.length; i += 8) chunks.push(list.slice(i, i + 8));
+    await Promise.all(chunks.map(worker));
+    return results;
+  }
+
+  async function ensureCheapCid() {
+    if (!settings.cidFix) return;
+    if (!isPropertyPage()) return;
+    const cache = getCidCache();
+    if (cache && cache.bestCid !== undefined) {
+      const cur = currentCid();
+      if (cache.bestCid === null || cur === cache.bestCid) return;
+      redirectToCid(cache.bestCid, cur);
+      return;
+    }
+    notify('저가 채널(cid) 스캔 시작...');
+    const results = await runCidSweep((done, total) => {
+      if (done % 25 === 0 || done === total) notify(`cid 스캔 ${done}/${total}...`);
+    });
+    if (results.size === 0) { notify('cid 스캔 실패 — 잠시 후 다시 시도해줘'); return; }
+    let bestCid = null, bestTotal = Infinity;
+    for (const [cid, total] of results) {
+      if (total < bestTotal) { bestTotal = total; bestCid = cid; }
+    }
+    const cur = currentCid();
+    const curTotal = results.get(cur !== null ? cur : 2);
+    const prices = [...new Set(results.values())];
+    if (prices.length === 1) {
+      setCidCache({ bestCid: null, bestTotal: bestTotal, noCheap: true });
+      notify(`이 호텔은 cid 별 가격 차이 없음 (${bestTotal})`);
+      return;
+    }
+    setCidCache({ bestCid, bestTotal, noCheap: false });
+    if (curTotal !== undefined && bestTotal >= curTotal) {
+      notify(`이미 최저 채널 (${curTotal})`);
+      return;
+    }
+    notify(`저가 채널 발견: cid ${bestCid} → ${bestTotal} (기존 ${curTotal !== undefined ? curTotal : '?'})`);
+    if (bestCid !== cur) redirectToCid(bestCid, cur);
+  }
+
+  function redirectToCid(cid, fromCid) {
+    try {
+      const url = new URL(location.href);
+      url.searchParams.set('cid', String(cid));
+      if (fromCid !== null && fromCid !== undefined) {
+        try { sessionStorage.setItem(CID_FIXED_FLAG, String(fromCid)); } catch (e) {}
+      }
+      location.replace(url.toString());
+    } catch (e) {}
+  }
 
   function nightsFromUrl() {
     const m = location.search.match(/[?&]los=(\d+)/);
@@ -486,6 +683,7 @@
           <label><input type="checkbox" id="nyx-agoda-cfg-autoselect" ${settings.autoSelect ? 'checked' : ''}> 최저가 방 자동선택</label>
           <label><input type="checkbox" id="nyx-agoda-cfg-promo" ${settings.promoHunt ? 'checked' : ''}> 쿠폰 자동시도</label>
           <label><input type="checkbox" id="nyx-agoda-cfg-watch" ${settings.watchPrice ? 'checked' : ''}> 가격변동 감지</label>
+          <label><input type="checkbox" id="nyx-agoda-cfg-cid" ${settings.cidFix ? 'checked' : ''}> 저가 채널(cid) 자동적용</label>
         </div>
         <div id="nyx-agoda-currency">
           <select id="nyx-agoda-curr-sel">
@@ -534,6 +732,10 @@
     });
     panel.querySelector('#nyx-agoda-cfg-watch').addEventListener('change', e => {
       settings.watchPrice = e.target.checked; saveSettings();
+    });
+    panel.querySelector('#nyx-agoda-cfg-cid').addEventListener('change', e => {
+      settings.cidFix = e.target.checked; saveSettings();
+      notify(settings.cidFix ? '저가 채널 자동적용 켜짐 — 다음 방문부터 적용' : '저가 채널 자동적용 꺼짐');
     });
     panel.querySelector('#nyx-agoda-curr-sel').addEventListener('change', e => {
       if (e.target.value) switchCurrency(e.target.value);
@@ -584,7 +786,18 @@
     const min = prices.length ? Math.min(...prices.map(p => p.price.value)) : null;
     const minP = prices.length ? prices.find(p => p.price.value === min) : null;
     const h = prices.length ? store.get('history:' + priceHistoryKey(), null) : null;
+    const cid = currentCid();
+    const cidCache = getCidCache();
     let html = `통화: <b>${cur}</b>`;
+    if (cid !== null) {
+      let state = '<span style="color:#94a3b8">미확인</span>';
+      if (cidCache) {
+        state = cidCache.bestCid === null
+          ? '<span style="color:#94a3b8">차이없음</span>'
+          : (cidCache.bestCid === cid ? '<span style="color:#22c55e">저가 ✓</span>' : `<span style="color:#dc2626">고가 → ${cidCache.bestCid} 적용</span>`);
+      }
+      html += `<br>채널: cid <b>${cid}</b> ${state}`;
+    }
     if (hotelCur && cur && cur !== hotelCur) {
       html += ` <span style="color:#dc2626">⚠ 현지통화 ${hotelCur} 아님 → 5% 수수료 위험</span>`;
     }
@@ -620,6 +833,9 @@
     notify('로드됨 — 최저가 스캔 시작');
     if (settings.promoHunt && /payment|checkout|book/.test(location.pathname)) {
       setTimeout(() => { if (findPromoInput()) promoHunt(); }, 3000);
+    }
+    if (settings.cidFix && isPropertyPage()) {
+      setTimeout(() => { ensureCheapCid(); }, 4000);
     }
   }
 

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.10.0
-// @description  전 세계 아고다 숙소 최저가 도우미 — 안전한 CID 비교/재검증, 2인 유효 최저가, 세금포함 총액, 수동 1클릭 예약
+// @version      1.10.1
+// @description  전 세계 아고다 숙소 최저가 도우미 — 검증된 쿠폰팩 활성화, 결제 총액 기준 쿠폰 비교, 안전한 CID 재검증
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
@@ -37,32 +37,33 @@
   // GET /promotion/redeem?cinfo=... with a logged-in session assigns the coupon
   // to the user's wallet server-side; the code is then usable at checkout.
   const CAMPAIGNS = [
-    { code: 'OAWAGODA', cinfo: '20250207_539062', siteId: 1948524, note: '10% 호텔 (최대 $100)' },
-    { code: 'OAWACTIVITY', cinfo: '20251210_547024', siteId: 1948524, note: '5% 액티비티' },
-    { code: 'AWESAMAGODA', cinfo: '20250827_542672', siteId: 1948860, note: '인플루언서 코드' },
-    { code: 'JOSHDELACRUZ', cinfo: '20250814_542157', siteId: 1948768, note: '인플루언서 코드' },
-    { code: 'ROLDAGODA', cinfo: '20250909_543197', siteId: 1948930, note: '인플루언서 코드' },
-    { code: 'THELUDOVICES', cinfo: '20250924_543905', siteId: 1949005, note: '인플루언서 코드' },
-    { code: 'ENZOAGODA', cinfo: '20250916_543514', siteId: 1948977, note: '인플루언서 코드' },
-    { code: 'JOSHAGODA', cinfo: '20250718_542772', siteId: 1948768, note: '인플루언서 코드' },
-    { code: 'ROLDFAGODA', cinfo: '20250915_543653', siteId: 1948930, note: '인플루언서 코드' },
-    { code: 'HELLOAGODA5', cinfo: '20250915_543662', siteId: 1948939, note: '5% 코드' },
-    { code: 'AGODAENZO', cinfo: '20250915_543699', siteId: 1948977, note: '인플루언서 코드' },
-    { code: 'SORALAGODA', cinfo: '20250717_541548', siteId: 1948654, note: '인플루언서 코드' },
-    { code: 'INATOTRAVEL', cinfo: '20250926_543970', siteId: 1949010, note: '인플루언서 코드' },
-    { code: 'TEAMLUDOVICE', cinfo: '20250926_543965', siteId: 1949005, note: '인플루언서 코드' },
-    { code: 'HELLOCAMZ', cinfo: '20250909_543206', siteId: 1948939, note: '인플루언서 코드' },
-    { code: 'VISITMANILA', cinfo: '20250814_542178', siteId: 1948789, note: '15% 마닐라' }
+    { code: 'OAWAGODA', cinfo: '20250207_539062', siteId: 1948524, rate: 10, kind: 'hotel', note: '호텔 최대 10% (실측 지갑 8%)' },
+    { code: 'OAWACTIVITY', cinfo: '20251210_547024', siteId: 1948524, rate: 5, kind: 'activity', note: '액티비티 5%' },
+    { code: 'AWESAMAGODA', cinfo: '20250827_542672', siteId: 1948860, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'JOSHDELACRUZ', cinfo: '20250814_542157', siteId: 1948768, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'ROLDAGODA', cinfo: '20250909_543197', siteId: 1948930, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'THELUDOVICES', cinfo: '20250924_543905', siteId: 1949005, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'ENZOAGODA', cinfo: '20250916_543514', siteId: 1948977, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'JOSHAGODA', cinfo: '20250718_542772', siteId: 1948768, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'ROLDFAGODA', cinfo: '20250915_543653', siteId: 1948930, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'HELLOAGODA5', cinfo: '20250915_543662', siteId: 1948939, rate: 5, kind: 'hotel', note: '호텔 5%' },
+    { code: 'AGODAENZO', cinfo: '20250915_543699', siteId: 1948977, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'SORALAGODA', cinfo: '20250717_541548', siteId: 1948654, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'INATOTRAVEL', cinfo: '20250926_543970', siteId: 1949010, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'TEAMLUDOVICE', cinfo: '20250926_543965', siteId: 1949005, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'HELLOCAMZ', cinfo: '20250909_543206', siteId: 1948939, rate: 8, kind: 'hotel', note: '호텔 8%' },
+    { code: 'VISITMANILA', cinfo: '20250814_542178', siteId: 1948789, rate: 15, kind: 'hotel', note: '마닐라 최대 15% (실측 지갑 8%)' },
+    { code: 'AGODATPT', cinfo: '20250321_539104', siteId: 1948562, rate: 10, kind: 'hotel', note: '호텔 최대 10% (실측 지갑 8%)' }
   ];
 
   const DEFAULTS = {
     highlight: false,
     autoSelect: false,
-    promoHunt: false,
+    promoHunt: true,
     currencyAuto: false,
     watchPrice: false,
     cidFix: true,
-    autoRedeem: false,
+    autoRedeem: true,
     taxFactor: 1.265,
     promoList: [
       'OAWAGODA', 'OAWACTIVITY', 'AWESAMAGODA', 'AGODA2026', 'NEWUSER8',
@@ -89,16 +90,16 @@
   };
   const settings = Object.assign({}, DEFAULTS, store.get('settings', {}));
   const saveSettings = () => store.set('settings', settings);
-  const SAFE_SETTINGS_VERSION = '1.10.0';
+  const SAFE_SETTINGS_VERSION = '1.10.1';
   if (store.get('safe-settings-version', null) !== SAFE_SETTINGS_VERSION) {
-    // Older releases enabled DOM mutation, coupon attempts and booking clicks by
-    // default. Disable those persisted switches once; CID price comparison stays on.
+    // Keep visual/booking mutations off after an upgrade, but enable the verified
+    // wallet and checkout-total coupon workflows requested for this release.
     settings.highlight = false;
     settings.autoSelect = false;
-    settings.promoHunt = false;
+    settings.promoHunt = true;
     settings.currencyAuto = false;
     settings.watchPrice = false;
-    settings.autoRedeem = false;
+    settings.autoRedeem = true;
     saveSettings();
     store.set('safe-settings-version', SAFE_SETTINGS_VERSION);
   }
@@ -286,6 +287,14 @@
 
   function isPropertyPage() {
     return /\/hotel\/|\/property\//.test(location.pathname);
+  }
+
+  function isCheckoutPage() {
+    return /\/(?:book|payment|checkout)(?:\/|$)/i.test(location.pathname);
+  }
+
+  function isSupportedPage() {
+    return isPropertyPage() || isCheckoutPage();
   }
 
   function requestUrl(input) {
@@ -1694,68 +1703,278 @@
 
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-  async function tryPromoCode(code) {
-    const input = findPromoInput();
-    if (!input) return { code, ok: false, reason: 'no-input' };
-    const applyBtn = findApplyButton();
-    setNativeValue(input, code);
-    await sleep(400);
-    if (applyBtn) applyBtn.click();
-    else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
-    await sleep(3000);
-    const discountText = readDiscount();
-    return { code, ok: discountText !== null, reason: discountText !== null ? discountText : 'no-discount' };
-  }
-
   function findPromoInput() {
     try {
-      const el = document.querySelector(SEL.promoInput);
-      if (el && isVisible(el)) return el;
+      for (const el of document.querySelectorAll(SEL.promoInput)) {
+        const type = String(el.type || 'text').toLowerCase();
+        if (!['text', 'search', 'tel', 'url'].includes(type)) continue;
+        if (el.closest('#nyx-agoda-panel')) continue;
+        if (isVisible(el)) return el;
+      }
     } catch (e) {}
     return null;
   }
 
-  function findApplyButton() {
-    const btns = document.querySelectorAll('button, [role="button"], a.btn');
-    for (const b of btns) {
-      if (!isVisible(b)) continue;
-      const t = (b.textContent || '').trim().toLowerCase();
-      if (/^apply|적용|使用|redeem/.test(t) && t.length < 12) return b;
-    }
-    return null;
+  function parseMoneyNumber(raw) {
+    const value = String(raw || '').replace(/\s/g, '');
+    if (!value || !/\d/.test(value)) return null;
+    if (/^\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(value)) return Number(value.replace(/,/g, ''));
+    if (/^\d{1,3}(?:\.\d{3})+(?:,\d+)?$/.test(value)) return Number(value.replace(/\./g, '').replace(',', '.'));
+    if (/^\d+[.,]\d{1,2}$/.test(value)) return Number(value.replace(',', '.'));
+    const n = Number(value.replace(/[^\d]/g, ''));
+    return Number.isFinite(n) ? n : null;
   }
 
-  function readDiscount() {
-    const candidates = document.querySelectorAll('[class*="discount" i], [class*="promo" i], [class*="coupon" i], [data-selenium*="discount" i]');
-    for (const c of candidates) {
-      if (!isVisible(c)) continue;
-      const t = (c.textContent || '').trim();
-      if (PRICE_RE.test(t) && /discount|할인|saved|savings|-|−/i.test(t) && t.length < 200) {
-        return t.replace(/\s+/g, ' ').slice(0, 120);
+  function moneyValues(text) {
+    const values = [];
+    const source = String(text || '').replace(/\u00a0/g, ' ');
+    const re = /(?:(?:US\$|S\$|HK\$|A\$|C\$|NZ\$|CN¥|R\$|RM|Rp|zł|CHF|KRW|USD|JPY|EUR|GBP|CNY|HKD|SGD|THB|IDR|MYR|PHP|VND|TWD|AUD|CAD|NZD|INR|AED|BRL|TRY|MXN|ZAR|PLN|SEK|NOK|DKK|CZK|UAH|[$€£¥₩￦฿₹₫₱₺₴])\s*([\d][\d.,]*)|([\d][\d.,]*)\s*(?:원|엔|KRW|USD|JPY|EUR|GBP|CNY|HKD|SGD|THB|IDR|MYR|PHP|VND|TWD|AUD|CAD|CHF|NZD|INR|AED|BRL|TRY|MXN|ZAR|PLN|SEK|NOK|DKK|CZK|UAH)\b)/gi;
+    let match;
+    while ((match = re.exec(source))) {
+      const n = parseMoneyNumber(match[1] || match[2]);
+      if (n !== null) values.push(n);
+    }
+    return values;
+  }
+
+  function readCheckoutTotal() {
+    const found = [];
+    const add = (node, score) => {
+      if (!node || !isVisible(node) || node.closest('#nyx-agoda-panel')) return;
+      const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length > 1000) return;
+      const values = moneyValues(text);
+      if (values.length) found.push({ value: values[values.length - 1], raw: text.slice(0, 180), score });
+    };
+    const direct = '[data-testid*="total" i], [data-selenium*="total" i], [data-element-name*="total" i], [id*="total-price" i], [class*="grand-total" i]';
+    try { document.querySelectorAll(direct).forEach(node => add(node, 80)); } catch (e) {}
+    try {
+      for (const label of document.querySelectorAll('h1,h2,h3,h4,h5,p,span,div,dt,strong')) {
+        if (!isVisible(label) || label.closest('#nyx-agoda-panel')) continue;
+        const text = (label.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!/^(?:합계|총액|총 결제(?:금액)?|최종 결제(?:금액)?|total|grand total|amount due|ご請求額|合計|总计|總計)\s*:?(?:\s|$)/i.test(text) || text.length > 80) continue;
+        let node = label;
+        for (let depth = 0; depth < 3 && node; depth++, node = node.parentElement) add(node, 120 - depth * 10);
+      }
+    } catch (e) {}
+    found.sort((a, b) => b.score - a.score);
+    return found[0] || null;
+  }
+
+  function promoScope(input) {
+    if (!input) return null;
+    return input.closest('[data-selenium*="promo" i], [data-selenium*="coupon" i], [data-testid*="promo" i], [data-testid*="coupon" i], [class*="promo" i], [class*="coupon" i]') || input.parentElement;
+  }
+
+  function findApplyButton(input = findPromoInput()) {
+    if (!input) return null;
+    const scopes = [];
+    let node = promoScope(input) || input.parentElement;
+    for (let i = 0; node && i < 3 && node !== document.body; i++, node = node.parentElement) scopes.push(node);
+    for (const scope of scopes) {
+      for (const button of scope.querySelectorAll('button, [role="button"], input[type="submit"]')) {
+        if (!isVisible(button) || button.closest('#nyx-agoda-panel')) continue;
+        const text = (button.textContent || button.value || button.getAttribute('aria-label') || '').trim();
+        if (/(?:\bapply\b|\bredeem\b|적용|사용|등록|適用|使用)/i.test(text) && text.length < 40) return button;
       }
     }
     return null;
   }
 
-  async function promoHunt() {
-    const codes = settings.promoList.filter(Boolean);
-    if (codes.length === 0 || findPromoInput() === null) {
-      notify('결제/예약 페이지에서만 쿠폰 시도 가능해');
-      return;
+  function findRemovePromoButton(activeCode = '') {
+    const code = String(activeCode || '').toUpperCase();
+    for (const button of document.querySelectorAll('button, [role="button"], a')) {
+      if (!isVisible(button) || button.closest('#nyx-agoda-panel')) continue;
+      const text = (button.textContent || button.getAttribute('aria-label') || button.getAttribute('title') || '').trim();
+      if (!/^(?:remove\b|delete\b|cancel\b|change\b|삭제|제거|취소|변경|해제|取り消し|削除)/i.test(text) || text.length > 40) continue;
+      const scope = button.closest('[data-selenium*="promo" i], [data-selenium*="coupon" i], [data-testid*="promo" i], [data-testid*="coupon" i], [class*="promo" i], [class*="coupon" i]');
+      const parentText = (scope || button.parentElement || button).textContent || '';
+      if (scope || /promo|coupon|voucher|프로모션|쿠폰|할인/i.test(parentText) || (code && parentText.toUpperCase().includes(code))) return button;
     }
+    return null;
+  }
+
+  function activePromoCode(input = findPromoInput()) {
+    const typed = input && String(input.value || '').trim().toUpperCase();
+    if (typed && /^[A-Z0-9_-]{3,40}$/.test(typed)) return typed;
+    const scopeText = ((promoScope(input) || document.body).textContent || '').toUpperCase();
+    return [...new Set(settings.promoList.map(code => String(code).trim().toUpperCase()).filter(Boolean))]
+      .find(code => scopeText.includes(code)) || null;
+  }
+
+  async function waitForPromoInput(timeout = 12000) {
+    const until = Date.now() + timeout;
+    while (Date.now() < until) {
+      const input = findPromoInput();
+      if (input) return input;
+      await sleep(250);
+    }
+    return null;
+  }
+
+  async function waitForCheckoutTotal(timeout = 8000) {
+    const until = Date.now() + timeout;
+    let last = null;
+    let stableAt = 0;
+    while (Date.now() < until) {
+      const total = readCheckoutTotal();
+      if (total) {
+        if (last !== null && Math.abs(last - total.value) < 0.005) {
+          if (!stableAt) stableAt = Date.now();
+          if (Date.now() - stableAt >= 450) return total;
+        } else {
+          last = total.value;
+          stableAt = 0;
+        }
+      }
+      await sleep(150);
+    }
+    return readCheckoutTotal();
+  }
+
+  async function waitForPromoOutcome(before, input, timeout = 2600) {
+    const scope = promoScope(input);
+    const until = Date.now() + timeout;
+    let changedValue = null;
+    let changedAt = 0;
+    let statusText = '';
+    while (Date.now() < until) {
+      statusText = ((scope && scope.textContent) || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+      if (/invalid|expired|not\s+(?:valid|applicable|eligible)|cannot|unable|failed|유효하지|만료|적용할 수 없|사용할 수 없|대상이 아닙니다|실패|無効|期限切れ/i.test(statusText)) {
+        return { applied: false, ok: false, total: readCheckoutTotal(), reason: statusText || 'rejected' };
+      }
+      const total = readCheckoutTotal();
+      if (before && total && Math.abs(total.value - before.value) >= 0.005) {
+        if (changedValue !== null && Math.abs(changedValue - total.value) < 0.005) {
+          if (Date.now() - changedAt >= 450) {
+            return { applied: true, ok: total.value < before.value, total, reason: statusText || 'total-changed' };
+          }
+        } else {
+          changedValue = total.value;
+          changedAt = Date.now();
+        }
+      }
+      await sleep(150);
+    }
+    const total = readCheckoutTotal();
+    const changed = !!(before && total && Math.abs(total.value - before.value) >= 0.005);
+    const removable = !!findRemovePromoButton(input && input.value);
+    return { applied: changed || removable, ok: !!(before && total && total.value < before.value), total, reason: statusText || 'no-total-change' };
+  }
+
+  async function tryPromoCode(code, before = null) {
+    const input = await waitForPromoInput(2500);
+    if (!input) return { code, applied: false, ok: false, total: null, reason: 'no-input' };
+    setNativeValue(input, '');
+    setNativeValue(input, code);
+    await sleep(120);
+    const applyButton = findApplyButton(input);
+    if (applyButton && !applyButton.disabled) applyButton.click();
+    else input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', bubbles: true }));
+    const outcome = await waitForPromoOutcome(before || readCheckoutTotal(), input);
+    return Object.assign({ code }, outcome);
+  }
+
+  async function resetPromoCode(activeCode = '', expectedTotal = null) {
+    const remove = findRemovePromoButton(activeCode);
+    if (remove) {
+      remove.click();
+      const total = await waitForCheckoutTotal(5000);
+      const restored = !expectedTotal || (total && Math.abs(total.value - expectedTotal.value) < 0.01);
+      return { ok: !!restored, total, usedRemove: true };
+    }
+    const input = findPromoInput();
+    if (input) setNativeValue(input, '');
+    const total = await waitForCheckoutTotal(900);
+    const restored = !expectedTotal || (total && Math.abs(total.value - expectedTotal.value) < 0.01);
+    return { ok: !!restored, total, usedRemove: false };
+  }
+
+  function promoCodeRank(code) {
+    const numbers = String(code).match(/(?:25|15|14|12|10|8|7|6|5)/g);
+    return numbers ? Math.max(...numbers.map(Number)) : 0;
+  }
+
+  function chooseBestPromoResult(baseline, results) {
+    const choices = [{ code: null, total: baseline.value, raw: baseline.raw, source: 'wallet/base' }];
+    for (const result of results || []) {
+      if (result && result.ok && result.total && Number.isFinite(result.total.value)) {
+        choices.push({ code: result.code, total: result.total.value, raw: result.total.raw, source: 'code' });
+      }
+    }
+    choices.sort((a, b) => a.total - b.total || String(a.code || '').localeCompare(String(b.code || '')));
+    return choices[0];
+  }
+
+  let promoHuntPromise = null;
+  async function runPromoHunt() {
+    const input = await waitForPromoInput();
+    const uniqueCodes = [...new Set(settings.promoList.map(code => String(code).trim().toUpperCase()).filter(Boolean))]
+      .sort((a, b) => promoCodeRank(b) - promoCodeRank(a));
+    if (!input || uniqueCodes.length === 0) {
+      notify('이 결제 단계에는 입력형 쿠폰란이 없어 — 지갑 쿠폰 최저가를 유지해');
+      return null;
+    }
+    const initial = await waitForCheckoutTotal();
+    if (!initial) {
+      notify('결제 합계를 읽지 못해 쿠폰을 임의 적용하지 않았어');
+      return null;
+    }
+
     const results = [];
-    for (const code of codes) {
-      const r = await tryPromoCode(code);
-      results.push(r);
-      if (r.ok) notify(`쿠폰 유효: ${code} → ${r.reason}`);
+    const originalCode = activePromoCode(input);
+    if (originalCode) {
+      const reset = await resetPromoCode(originalCode);
+      if (!reset.ok || !reset.total) {
+        notify(`기존 쿠폰 ${originalCode}을 안전하게 해제하지 못해 검색을 중단했어`);
+        return null;
+      }
+      if (initial.value < reset.total.value) results.push({ code: originalCode, ok: true, total: initial, reason: 'original' });
     }
-    const valid = results.filter(r => r.ok);
-    notify(`쿠폰 검색 완료 — ${valid.length}개 유효`);
-    if (valid.length > 0) {
-      const best = valid[valid.length - 1];
-      await tryPromoCode(best.code);
-      notify(`최종 적용: ${best.code}`);
+    let baseline = originalCode ? await waitForCheckoutTotal() : initial;
+    if (!baseline) baseline = initial;
+    notify(`쿠폰 ${uniqueCodes.length}개를 실제 합계 ${formatNum(baseline.value)} 기준으로 비교 시작`);
+
+    for (let index = 0; index < uniqueCodes.length; index++) {
+      const code = uniqueCodes[index];
+      const result = await tryPromoCode(code, baseline);
+      results.push(result);
+      if (result.ok && result.total) notify(`쿠폰 할인 확인: ${code} → ${formatNum(result.total.value)}`);
+      const reset = await resetPromoCode(code, baseline);
+      if (result.applied && (!reset.ok || !reset.total)) {
+        notify(`${code} 해제 확인 실패 — 현재 할인은 유지하고 검색을 중단했어`);
+        return result;
+      }
+      if ((index + 1) % 5 === 0 || index + 1 === uniqueCodes.length) notify(`쿠폰 실측 ${index + 1}/${uniqueCodes.length}`);
     }
+
+    const measured = results.filter(result => result.ok && result.total)
+      .sort((a, b) => a.total.value - b.total.value);
+    const best = chooseBestPromoResult(baseline, measured);
+    if (!best.code) {
+      notify(`입력형 쿠폰보다 지갑/기본 할인이 최저: ${formatNum(baseline.value)}`);
+      return best;
+    }
+
+    for (const candidate of measured) {
+      const applied = await tryPromoCode(candidate.code, baseline);
+      if (applied.ok && applied.total && applied.total.value <= candidate.total.value + 0.01) {
+        notify(`최저 쿠폰 실제 적용 완료: ${candidate.code} → ${formatNum(applied.total.value)}`);
+        return applied;
+      }
+      await resetPromoCode(candidate.code, baseline);
+    }
+    notify('측정된 쿠폰을 다시 검증했지만 합계가 재현되지 않아 지갑/기본 최저가를 유지해');
+    return best;
+  }
+
+  function promoHunt() {
+    if (promoHuntPromise) {
+      notify('쿠폰 실측이 이미 진행 중이야');
+      return promoHuntPromise;
+    }
+    promoHuntPromise = runPromoHunt().finally(() => { promoHuntPromise = null; });
+    return promoHuntPromise;
   }
 
   function currentCurrencyFromUrl() {
@@ -1763,60 +1982,102 @@
     return m ? m[1].toUpperCase() : null;
   }
 
-  const REDEEM_DONE_KEY = 'nyx-redeem-done';
+  const REDEEM_DONE_KEY = 'nyx-redeem-done-v1101';
+
+  function campaignId(campaign) {
+    const match = String(campaign && campaign.cinfo || '').match(/_(\d+)$/);
+    return match ? Number(match[1]) : null;
+  }
+
+  function walletEntryMatchesCampaign(entry, campaign) {
+    if (!entry || !campaign) return false;
+    const entryId = Number(entry.campaignId || entry.campaignID || entry.id);
+    const entryCode = String(entry.promotionCode || entry.code || '').toUpperCase();
+    return (campaignId(campaign) !== null && entryId === campaignId(campaign)) || entryCode === campaign.code;
+  }
+
+  function walletDiscountLabel(entry) {
+    if (!entry) return '';
+    const value = Number(entry.discountValue);
+    if (!Number.isFinite(value)) return String(entry.displayValue || '');
+    return /percent/i.test(String(entry.discountType || '')) ? `${value}%` : `${value}`;
+  }
 
   async function scanWallet() {
     try {
       const r = await fetch('/api/gw/promocode/v1/wallet/list', {
-        method: 'POST',
+        method: 'POST', credentials: 'include',
         headers: { 'content-type': 'application/json', 'ag-initiator-api-key': 'b3949fd5-9553-4b4e-b221-48be2a1b84a8', 'ag-initiator-version': '6_0' },
         body: '{}'
       });
       const j = await r.json();
-      if (!j || !Array.isArray(j.walletData)) return [];
-      return j.walletData.filter(w => w);
+      if (!r.ok || !j || j.isSuccess === false || !Array.isArray(j.walletData)) {
+        return { ok: false, items: [], error: (j && j.error) || `HTTP ${r.status}` };
+      }
+      return { ok: true, items: j.walletData.filter(Boolean), error: null };
     } catch (e) {
-      return [];
+      return { ok: false, items: [], error: String(e && e.message || e) };
     }
   }
 
   async function redeemAllCampaigns({ force = false } = {}) {
     try {
       if (!force && sessionStorage.getItem(REDEEM_DONE_KEY)) {
-        notify('이번 세션에서 이미 캠페인 활성화 시도했어');
-        return;
+        const current = await scanWallet();
+        const wallet = current.ok ? current.items : [];
+        const verified = CAMPAIGNS.filter(campaign => wallet.some(entry => walletEntryMatchesCampaign(entry, campaign)));
+        notify(`이번 세션 쿠폰팩 검증 완료 상태 — 실제 지갑 ${verified.length}개`);
+        return { ok: current.ok, wallet, verified, added: [] };
       }
       if (force) sessionStorage.removeItem(REDEEM_DONE_KEY);
-      // One coupon per site_id per session — first redeem of a site wins.
-      const seenSites = new Set();
-      const targets = CAMPAIGNS.filter(c => {
-        if (seenSites.has(c.siteId)) return false;
-        seenSites.add(c.siteId);
-        return true;
-      });
-      let ok = 0;
-      for (const c of targets) {
-        try {
-          const r = await fetch('/promotion/redeem?cinfo=' + c.cinfo, {
-            method: 'GET', credentials: 'include',
-            headers: { 'ag-cid': '1895693', 'ag-language-locale': 'en-us' }
-          });
-          if (r.ok) ok++;
-        } catch (e) {}
-        await sleep(600);
+      const initial = await scanWallet();
+      if (!initial.ok) {
+        notify(`쿠폰 지갑 조회 실패: ${initial.error || '로그인/세션 확인 필요'}`);
+        return { ok: false, wallet: [], verified: [], added: [] };
       }
-      sessionStorage.setItem(REDEEM_DONE_KEY, '1');
-      const wallet = await scanWallet();
-      notify(`캠페인 활성화 시도 ${ok}/${targets.length}개 (site_id 중복 제외) — 지갑 쿠폰 ${wallet.length}개`);
-      if (wallet.length > 0) {
-        for (const w of wallet.slice(0, 5)) {
-          const t = [w.code, w.campaignName, w.displayValue, w.discountType && w.discountValue !== undefined ? `${w.discountType}/${w.discountValue}` : null]
-            .filter(Boolean).join(' ');
-          if (t) notify(`지갑: ${t}`);
+      let wallet = initial.items;
+      const beforeIds = new Set(wallet.map(entry => Number(entry.campaignId)).filter(Number.isFinite));
+      const groups = new Map();
+      for (const campaign of CAMPAIGNS.filter(item => item.kind !== 'activity')) {
+        if (!groups.has(campaign.siteId)) groups.set(campaign.siteId, []);
+        groups.get(campaign.siteId).push(campaign);
+      }
+      for (const group of groups.values()) group.sort((a, b) => (b.rate || 0) - (a.rate || 0));
+      const cid = currentCid();
+      let attempted = 0;
+      for (const group of groups.values()) {
+        if (group.some(campaign => wallet.some(entry => walletEntryMatchesCampaign(entry, campaign)))) continue;
+        for (const campaign of group) {
+          attempted++;
+          try {
+            const query = new URLSearchParams({ cinfo: campaign.cinfo });
+            if (cid !== null && cid > 0) query.set('cid', String(cid));
+            const headers = { 'ag-language-locale': document.documentElement.lang || 'ko-kr' };
+            if (cid !== null && cid > 0) headers['ag-cid'] = String(cid);
+            const response = await fetch('/promotion/redeem?' + query.toString(), {
+              method: 'GET', credentials: 'include', redirect: 'follow', headers
+            });
+            await response.text();
+          } catch (e) {}
+          await sleep(120);
+          const checked = await scanWallet();
+          if (!checked.ok) continue;
+          wallet = checked.items;
+          if (group.some(item => wallet.some(entry => walletEntryMatchesCampaign(entry, item)))) break;
         }
       }
-      return wallet;
-    } catch (e) {}
+      const verified = CAMPAIGNS.filter(campaign => wallet.some(entry => walletEntryMatchesCampaign(entry, campaign)));
+      const added = wallet.filter(entry => Number.isFinite(Number(entry.campaignId)) && !beforeIds.has(Number(entry.campaignId)));
+      sessionStorage.setItem(REDEEM_DONE_KEY, JSON.stringify({ at: Date.now(), verified: verified.map(item => item.code) }));
+      notify(`쿠폰팩 검증 완료 — 실제 지갑 ${verified.length}개 / 신규 ${added.length}개 / 요청 ${attempted}회`);
+      for (const entry of wallet.filter(item => CAMPAIGNS.some(campaign => walletEntryMatchesCampaign(item, campaign))).slice(0, 12)) {
+        notify(`지갑 확인: ${entry.promotionCode || entry.code || entry.campaignName || entry.campaignId} ${walletDiscountLabel(entry)}`.trim());
+      }
+      return { ok: true, wallet, verified, added };
+    } catch (e) {
+      notify(`쿠폰팩 활성화 오류: ${String(e && e.message || e)}`);
+      return { ok: false, wallet: [], verified: [], added: [] };
+    }
   }
 
   function switchCurrency(code) {
@@ -1913,17 +2174,17 @@
     panel.id = 'nyx-agoda-panel';
     panel.innerHTML = `
       <div id="nyx-agoda-panel-head">
-        <span>🏷 아고다 최저가 v1.10.0</span>
+        <span>🏷 아고다 최저가 v1.10.1</span>
         <button id="nyx-agoda-collapse" title="접기">—</button>
       </div>
       <div id="nyx-agoda-panel-body">
         <div id="nyx-agoda-info">로딩 중...</div>
         <div id="nyx-agoda-controls">
           <label><input type="checkbox" id="nyx-agoda-cfg-highlight" ${settings.highlight ? 'checked' : ''}> 최저가 하이라이트</label>
-          <label><input type="checkbox" id="nyx-agoda-cfg-promo" ${settings.promoHunt ? 'checked' : ''}> 쿠폰 자동시도</label>
+          <label><input type="checkbox" id="nyx-agoda-cfg-promo" ${settings.promoHunt ? 'checked' : ''}> 결제합계 쿠폰 자동비교</label>
           <label><input type="checkbox" id="nyx-agoda-cfg-watch" ${settings.watchPrice ? 'checked' : ''}> 가격변동 감지</label>
           <label><input type="checkbox" id="nyx-agoda-cfg-cid" ${settings.cidFix ? 'checked' : ''}> 저가 채널(cid) 자동적용</label>
-          <label><input type="checkbox" id="nyx-agoda-cfg-redeem" ${settings.autoRedeem ? 'checked' : ''}> 캠페인 쿠폰 자동활성화</label>
+          <label><input type="checkbox" id="nyx-agoda-cfg-redeem" ${settings.autoRedeem ? 'checked' : ''}> 쿠폰팩 실제 지갑 활성화</label>
         </div>
         <div id="nyx-agoda-currency">
           <select id="nyx-agoda-curr-sel">
@@ -1935,8 +2196,8 @@
         <div id="nyx-agoda-actions">
           <button id="nyx-agoda-book-now">🎯 최저가 바로 예약</button>
           <button id="nyx-agoda-cid-rescan">🔎 실사용 CID ${ACTIVE_CIDS.length}개 검사</button>
-          <button id="nyx-agoda-promo-run">🎟 쿠폰 지금 시도</button>
-          <button id="nyx-agoda-redeem-run">💳 캠페인 쿠폰 활성화</button>
+          <button id="nyx-agoda-promo-run">🎟 최저 쿠폰 실측 적용</button>
+          <button id="nyx-agoda-redeem-run">💳 쿠폰팩 지갑 검증</button>
           <button id="nyx-agoda-promo-edit">쿠폰 목록 편집</button>
         </div>
         <textarea id="nyx-agoda-promo-list" style="display:none" rows="4" placeholder="쿠폰 코드 한 줄에 하나"></textarea>
@@ -2111,7 +2372,7 @@
     let lastCidNavKey = cidLocationKey();
     setInterval(() => {
       const panel = document.getElementById('nyx-agoda-panel');
-      if (!isPropertyPage()) {
+      if (!isSupportedPage()) {
         if (panel) panel.style.display = 'none';
         return;
       }
@@ -2126,15 +2387,23 @@
         setTimeout(() => ensureCheapCid(), 3000);
       }
     }, 3000);
-    notify('로드됨 — 최저가 스캔 시작');
-    if (settings.promoHunt && /payment|checkout|book/.test(location.pathname)) {
-      setTimeout(() => { if (findPromoInput()) promoHunt(); }, 3000);
-    }
-    if (settings.cidFix && isPropertyPage()) {
-      setTimeout(() => { ensureCheapCid(); }, 4000);
-    }
-    if (settings.autoRedeem) {
-      setTimeout(() => { redeemAllCampaigns(); }, 6000);
+    notify(isCheckoutPage() ? '결제 페이지 로드됨 — 쿠폰팩+입력형 쿠폰 합계 비교 준비' : '로드됨 — 최저가 스캔 시작');
+    if (settings.promoHunt && isCheckoutPage()) setTimeout(() => { promoHunt(); }, 1800);
+    const startCid = () => {
+      if (settings.cidFix && isPropertyPage()) ensureCheapCid();
+    };
+    if (settings.autoRedeem && isPropertyPage()) {
+      setTimeout(async () => {
+        const result = await redeemAllCampaigns();
+        if (result && result.added && result.added.length > 0 && isPropertyPage()) {
+          notify('새 쿠폰팩을 가격에 반영하도록 숙소 페이지를 한 번 새로고침해');
+          setTimeout(() => location.reload(), 900);
+        } else {
+          startCid();
+        }
+      }, 900);
+    } else {
+      setTimeout(startCid, 3000);
     }
   }
 
@@ -2142,7 +2411,7 @@
     Object.defineProperty(window, '__NYX_AGODA__', {
       configurable: true,
       value: Object.freeze({
-        version: '1.10.0',
+        version: '1.10.1',
         getState: () => ({
           criteria: probeContext(), status: Object.assign({}, cidStatus),
           cache: getCidCache(), registryVersion: CID_REGISTRY_VERSION,
@@ -2161,6 +2430,16 @@
         test: Object.freeze({
           stableMedianTotal,
           extractModernTotal,
+          parseMoneyNumber,
+          moneyValues,
+          readCheckoutTotal,
+          findPromoInput,
+          isCheckoutPage,
+          scanWallet,
+          redeemAllCampaigns,
+          chooseBestPromoResult,
+          walletEntryMatchesCampaign,
+          campaignId,
           verificationCandidateCids: (results, activeCid) => verificationCandidateCids(new Map(results), activeCid),
           cidDestinationUrl,
           probeUrlForCid,
@@ -2182,14 +2461,14 @@
   } catch (e) {}
 
   let initialized = false;
-  let propertyBootScheduled = false;
-  function bootOnPropertyPage() {
-    if (initialized || propertyBootScheduled || !isPropertyPage()) return;
-    propertyBootScheduled = true;
-    hookCidCapture();
+  let supportedBootScheduled = false;
+  function bootOnSupportedPage() {
+    if (initialized || supportedBootScheduled || !isSupportedPage()) return;
+    supportedBootScheduled = true;
+    if (isPropertyPage()) hookCidCapture();
     const finishBoot = () => setTimeout(() => {
-      propertyBootScheduled = false;
-      if (initialized || !isPropertyPage() || !document.body) return;
+      supportedBootScheduled = false;
+      if (initialized || !isSupportedPage() || !document.body) return;
       initialized = true;
       init();
     }, 1500);
@@ -2197,10 +2476,10 @@
     else window.addEventListener('load', finishBoot, { once: true });
   }
 
-  function startPropertyWatcher() {
-    bootOnPropertyPage();
+  function startSupportedPageWatcher() {
+    bootOnSupportedPage();
     const timer = setInterval(() => {
-      bootOnPropertyPage();
+      bootOnSupportedPage();
       if (initialized) clearInterval(timer);
     }, 250);
   }
@@ -2212,13 +2491,13 @@
         if (typeof original !== 'function' || original.__nyxAgodaWrapped) return;
         const wrapped = function (...args) {
           const result = original.apply(this, args);
-          bootOnPropertyPage();
+          bootOnSupportedPage();
           return result;
         };
         Object.defineProperty(wrapped, '__nyxAgodaWrapped', { value: true });
         history[method] = wrapped;
       });
-      window.addEventListener('popstate', bootOnPropertyPage);
+      window.addEventListener('popstate', bootOnSupportedPage);
     } catch (e) {}
   }
 
@@ -2226,6 +2505,6 @@
   // the DOM; search pages remain pristine, while same-tab SPA hotel navigation
   // can install the price-request capture before Agoda sends the first request.
   hookSpaNavigation();
-  if (document.body) startPropertyWatcher();
-  else document.addEventListener('DOMContentLoaded', startPropertyWatcher, { once: true });
+  if (document.body) startSupportedPageWatcher();
+  else document.addEventListener('DOMContentLoaded', startSupportedPageWatcher, { once: true });
 })();

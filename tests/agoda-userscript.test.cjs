@@ -56,16 +56,41 @@ vm.runInContext(source, context, { filename: 'agoda-userscript.user.js' });
 
 const api = context.__NYX_AGODA__;
 assert(api, 'debug/test API should be exposed');
-assert.equal(api.version, '1.10.0');
-assert.equal(api.getState().safeSettingsVersion, '1.10.0');
-assert(api.getState().campaignCount >= 16, 'resolved campaign redeem links must be embedded');
+assert.equal(api.version, '1.10.1');
+assert.equal(api.getState().safeSettingsVersion, '1.10.1');
+assert(api.getState().campaignCount >= 17, 'resolved campaign redeem links must be embedded');
 assert(api.getState().promoListCount >= 30, 'scraped promo codes must be embedded');
 assert(!source.includes('// @exclude      https://www.agoda.com/*/search*'), 'SPA hotel navigation must keep the script alive');
-assert(source.includes("if (initialized || propertyBootScheduled || !isPropertyPage()) return;"));
+assert(source.includes("if (initialized || supportedBootScheduled || !isSupportedPage()) return;"), 'checkout pages must boot the userscript');
 assert(source.includes("['pushState', 'replaceState'].forEach(method =>"), 'SPA navigation must arm CID capture synchronously');
+assert(source.includes('promoHunt: true'), 'actual checkout coupon comparison must default on');
+assert(source.includes('autoRedeem: true'), 'campaign wallet activation must default on');
+assert(!source.includes('valid[valid.length - 1]'), 'the last apparently valid code must never be treated as the cheapest');
 assert(api.getState().candidateCount < 60, 'automatic scan must stay on the safe shortlist');
 assert(!source.includes('function autoSelectLowest('), 'the script must never auto-click a booking button');
 assert(!source.includes('if (settings.autoSelect) autoSelectLowest(prices);'));
+
+assert.equal(api.test.parseMoneyNumber('258,034'), 258034);
+assert.equal(api.test.parseMoneyNumber('1,234.56'), 1234.56);
+assert.deepEqual(Array.from(api.test.moneyValues('합계 ₩ 258,034')), [258034]);
+assert.deepEqual(Array.from(api.test.moneyValues('Total US$ 1,234.56')), [1234.56]);
+assert.deepEqual(
+  JSON.parse(JSON.stringify(api.test.chooseBestPromoResult(
+    { value: 258034, raw: '합계 ₩ 258,034' },
+    [
+      { code: 'BAD', ok: false, total: { value: 200000, raw: 'fake' } },
+      { code: 'SAVE8', ok: true, total: { value: 237391, raw: 'discounted' } },
+      { code: 'SAVE5', ok: true, total: { value: 245132, raw: 'discounted' } }
+    ]
+  ))),
+  { code: 'SAVE8', total: 237391, raw: 'discounted', source: 'code' },
+  'the lowest measured checkout total must win'
+);
+assert.equal(api.test.campaignId({ cinfo: '20250321_539104' }), 539104);
+assert.equal(api.test.walletEntryMatchesCampaign(
+  { campaignId: 539104, promotionCode: 'AGODATPT' },
+  { code: 'AGODATPT', cinfo: '20250321_539104' }
+), true, 'HTTP success is not enough; the wallet entry must match the campaign');
 
 const active = api.test.activeCids();
 const observed = api.test.publicObservedCids();

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.9.2
+// @version      1.9.3
 // @description  전 세계 아고다 숙소 최저가 도우미 — 현행 실사용 CID 전수 비교/재검증, 2인 유효 최저가 자동 선택, 세금포함 총액, 쿠폰 자동시도
 // @author       Nyx
 // @match        https://www.agoda.com/*
@@ -1122,6 +1122,7 @@
       if (ctx && ctx.hotelId && ctx.checkIn && (!requireCaptured || captured)) return ctx;
       await sleep(400);
     }
+    if (requireCaptured && !(capturedRoomGridTemplate || capturedLegacyTemplate)) return null;
     return probeContext();
   }
 
@@ -1139,9 +1140,10 @@
     }
     cidSweepPromise = (async () => {
       const hadPending = !!pendingCidToken();
-      const ctx = await waitForProbeContext(hadPending);
+      const ctx = await waitForProbeContext(true);
       if (!ctx || !ctx.hotelId || !ctx.checkIn) {
-        notify('cid 검색 실패 — 호텔/날짜 정보를 불러오지 못했어');
+        cidStatus = { phase: 'error', done: 0, total: 0, source: null };
+        notify('cid 검색 실패 — 객실 가격 API가 아직 없어. 객실 목록이 보인 뒤 [공개 CID 전체 재검증]을 눌러줘');
         return;
       }
       const startSignature = criteriaSignature(ctx);
@@ -1195,41 +1197,40 @@
       }
 
       const list = buildProbeList(ctx, { deep: !!options.deep });
-      notify(`${options.deep ? '공개 CID 전체 감사' : '현행 실사용 CID 비교'} 시작 — ${list.length}개, ${source === 'room-grid' ? '최신 API' : '호환 API'}`);
-      let sweep = await runCidSweepWithRetries(list, source, ctx, session, (done, total) => {
-        if (done % 20 === 0 || done === total) notify(`cid 검색 ${done}/${total}...`);
-      });
-      let results = sweep.results;
-      let completed = sweep.stats.complete;
-      let unresolvedCids = sweep.stats.unresolvedCids.slice();
+      const sampleList = [...new Set([activeCid, DEFAULT_CID, ...rememberedCids(), ...ACTIVE_HIGH_CIDS.slice(0, 8)])]
+        .filter(cid => normalizeCid(cid) !== null && (cid === activeCid || !rejectedCids(ctx).has(cid))).slice(0, 10);
+      const sampleIsUsable = sample => sample.results.has(activeCid) && sample.results.size >= 2 &&
+        sample.results.size / Math.max(1, sampleList.length) >= 0.7;
+      notify(`${options.deep ? '공개 CID 전체 감사' : '현행 실사용 CID 비교'} 사전 점검 — ${sampleList.length}개, ${source === 'room-grid' ? '최신 API' : '호환 API'}`);
+      let sampleSweep = await runCidSweepWithRetries(sampleList, source, ctx, session, (done, total) => {
+        if (done === total) notify(`${source === 'room-grid' ? '최신' : '호환'} 표본 ${done}/${total} 확인`);
+      }, 1);
 
-      const minimumValid = Math.max(3, Math.ceil(list.length * 0.15));
-      const severeModernGap = unresolvedCids.length > Math.max(3, Math.ceil(list.length * 0.1));
-      if (source === 'room-grid' && (severeModernGap || results.size < minimumValid || !results.has(activeCid))) {
-        notify('최신 API 응답이 부족해 호환 API를 소수 표본으로 확인 중...');
-        const sampleList = [...new Set([activeCid, DEFAULT_CID, ...rememberedCids(), ...ACTIVE_HIGH_CIDS.slice(0, 6)])]
-          .filter(cid => normalizeCid(cid) !== null && (cid === activeCid || !rejectedCids(ctx).has(cid))).slice(0, 10);
+      if (!sampleIsUsable(sampleSweep) && source === 'room-grid') {
+        notify('최신 API에 유효한 기준 가격이 없어 호환 API로 즉시 전환해');
+        for (let i = 0; i < 10 && !capturedLegacyTemplate; i++) await sleep(300);
         source = 'secondary';
         session = createProbeSession(source, ctx);
-        const sampleSweep = await runCidSweepWithRetries(sampleList, source, ctx, session, (done, total) => {
+        sampleSweep = await runCidSweepWithRetries(sampleList, source, ctx, session, (done, total) => {
           if (done === total) notify(`호환 표본 ${done}/${total} 확인`);
-        });
-        if (sampleSweep.results.size >= 2 && sampleSweep.results.has(activeCid) && sampleSweep.stats.complete) {
-          const sampled = new Set(sampleList);
-          const remaining = list.filter(cid => !sampled.has(cid));
-          notify('호환 API 표본 정상 — 전체 후보 확인 중...');
-          const restSweep = await runCidSweepWithRetries(remaining, source, ctx, session, (done, total) => {
-            if (done % 20 === 0 || done === total) notify(`호환 검색 ${done}/${total}...`);
-          });
-          results = new Map([...sampleSweep.results, ...restSweep.results]);
-          completed = sampleSweep.stats.complete && restSweep.stats.complete;
-          unresolvedCids = [...sampleSweep.stats.unresolvedCids, ...restSweep.stats.unresolvedCids];
-        } else {
-          results = sampleSweep.results;
-          completed = false;
-          const sampled = new Set(sampleList);
-          unresolvedCids = [...sampleSweep.stats.unresolvedCids, ...list.filter(cid => !sampled.has(cid))];
-        }
+        }, 1);
+      }
+
+      let results = sampleSweep.results;
+      let completed = false;
+      let unresolvedCids = sampleSweep.stats.unresolvedCids.slice();
+      const sampled = new Set(sampleList);
+      const remaining = list.filter(cid => !sampled.has(cid));
+      if (sampleIsUsable(sampleSweep)) {
+        notify(`${source === 'room-grid' ? '최신' : '호환'} API 표본 정상 — 나머지 ${remaining.length}개 확인 중...`);
+        const restSweep = await runCidSweepWithRetries(remaining, source, ctx, session, (done, total) => {
+          if (done % 20 === 0 || done === total) notify(`cid 검색 ${done}/${total}...`);
+        }, 2);
+        results = new Map([...sampleSweep.results, ...restSweep.results]);
+        completed = sampleSweep.stats.complete && restSweep.stats.complete;
+        unresolvedCids = [...sampleSweep.stats.unresolvedCids, ...restSweep.stats.unresolvedCids];
+      } else {
+        unresolvedCids = [...sampleSweep.stats.unresolvedCids, ...remaining];
       }
 
       const scannedBaselineTotal = results.get(activeCid);
@@ -1757,7 +1758,7 @@
     panel.id = 'nyx-agoda-panel';
     panel.innerHTML = `
       <div id="nyx-agoda-panel-head">
-        <span>🏷 아고다 최저가 v1.9.2</span>
+        <span>🏷 아고다 최저가 v1.9.3</span>
         <button id="nyx-agoda-collapse" title="접기">—</button>
       </div>
       <div id="nyx-agoda-panel-body">
@@ -1966,7 +1967,7 @@
     Object.defineProperty(window, '__NYX_AGODA__', {
       configurable: true,
       value: Object.freeze({
-        version: '1.9.2',
+        version: '1.9.3',
         getState: () => ({
           criteria: probeContext(), status: Object.assign({}, cidStatus),
           cache: getCidCache(), registryVersion: CID_REGISTRY_VERSION,

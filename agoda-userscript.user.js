@@ -1,15 +1,12 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.9.7
+// @version      1.9.8
 // @description  전 세계 아고다 숙소 최저가 도우미 — 안전한 CID 비교/재검증, 2인 유효 최저가, 세금포함 총액, 수동 1클릭 예약
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
 // @match        https://m.agoda.com/*
-// @exclude      https://www.agoda.com/*/search*
-// @exclude      https://agoda.com/*/search*
-// @exclude      https://m.agoda.com/*/search*
 // @updateURL    https://raw.githubusercontent.com/ad2das/agoda-lowest-price/main/agoda-userscript.user.js
 // @downloadURL  https://raw.githubusercontent.com/ad2das/agoda-lowest-price/main/agoda-userscript.user.js
 // @homepageURL  https://github.com/ad2das/agoda-lowest-price
@@ -1822,7 +1819,7 @@
     panel.id = 'nyx-agoda-panel';
     panel.innerHTML = `
       <div id="nyx-agoda-panel-head">
-        <span>🏷 아고다 최저가 v1.9.7</span>
+        <span>🏷 아고다 최저가 v1.9.8</span>
         <button id="nyx-agoda-collapse" title="접기">—</button>
       </div>
       <div id="nyx-agoda-panel-body">
@@ -2038,7 +2035,7 @@
     Object.defineProperty(window, '__NYX_AGODA__', {
       configurable: true,
       value: Object.freeze({
-        version: '1.9.7',
+        version: '1.9.8',
         getState: () => ({
           criteria: probeContext(), status: Object.assign({}, cidStatus),
           cache: getCidCache(), registryVersion: CID_REGISTRY_VERSION,
@@ -2100,6 +2097,27 @@
     }, 250);
   }
 
+  function hookSpaNavigation() {
+    try {
+      ['pushState', 'replaceState'].forEach(method => {
+        const original = history[method];
+        if (typeof original !== 'function' || original.__nyxAgodaWrapped) return;
+        const wrapped = function (...args) {
+          const result = original.apply(this, args);
+          bootOnPropertyPage();
+          return result;
+        };
+        Object.defineProperty(wrapped, '__nyxAgodaWrapped', { value: true });
+        history[method] = wrapped;
+      });
+      window.addEventListener('popstate', bootOnPropertyPage);
+    } catch (e) {}
+  }
+
+  // Install only the navigation detector at document-start. It does not touch
+  // the DOM; search pages remain pristine, while same-tab SPA hotel navigation
+  // can install the price-request capture before Agoda sends the first request.
+  hookSpaNavigation();
   if (document.body) startPropertyWatcher();
   else document.addEventListener('DOMContentLoaded', startPropertyWatcher, { once: true });
 })();

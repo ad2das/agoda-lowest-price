@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.9.8
+// @version      1.9.9
 // @description  전 세계 아고다 숙소 최저가 도우미 — 안전한 CID 비교/재검증, 2인 유효 최저가, 세금포함 총액, 수동 1클릭 예약
 // @author       Nyx
 // @match        https://www.agoda.com/*
@@ -33,6 +33,28 @@
     }
   };
 
+  // Campaign coupon redeem links (resolved from partner links, 2026-08-02).
+  // GET /promotion/redeem?cinfo=... with a logged-in session assigns the coupon
+  // to the user's wallet server-side; the code is then usable at checkout.
+  const CAMPAIGNS = [
+    { code: 'OAWAGODA', cinfo: '20250207_539062', siteId: 1948524, note: '10% 호텔 (최대 $100)' },
+    { code: 'OAWACTIVITY', cinfo: '20251210_547024', siteId: 1948524, note: '5% 액티비티' },
+    { code: 'AWESAMAGODA', cinfo: '20250827_542672', siteId: 1948860, note: '인플루언서 코드' },
+    { code: 'JOSHDELACRUZ', cinfo: '20250814_542157', siteId: 1948768, note: '인플루언서 코드' },
+    { code: 'ROLDAGODA', cinfo: '20250909_543197', siteId: 1948930, note: '인플루언서 코드' },
+    { code: 'THELUDOVICES', cinfo: '20250924_543905', siteId: 1949005, note: '인플루언서 코드' },
+    { code: 'ENZOAGODA', cinfo: '20250916_543514', siteId: 1948977, note: '인플루언서 코드' },
+    { code: 'JOSHAGODA', cinfo: '20250718_542772', siteId: 1948768, note: '인플루언서 코드' },
+    { code: 'ROLDFAGODA', cinfo: '20250915_543653', siteId: 1948930, note: '인플루언서 코드' },
+    { code: 'HELLOAGODA5', cinfo: '20250915_543662', siteId: 1948939, note: '5% 코드' },
+    { code: 'AGODAENZO', cinfo: '20250915_543699', siteId: 1948977, note: '인플루언서 코드' },
+    { code: 'SORALAGODA', cinfo: '20250717_541548', siteId: 1948654, note: '인플루언서 코드' },
+    { code: 'INATOTRAVEL', cinfo: '20250926_543970', siteId: 1949010, note: '인플루언서 코드' },
+    { code: 'TEAMLUDOVICE', cinfo: '20250926_543965', siteId: 1949005, note: '인플루언서 코드' },
+    { code: 'HELLOCAMZ', cinfo: '20250909_543206', siteId: 1948939, note: '인플루언서 코드' },
+    { code: 'VISITMANILA', cinfo: '20250814_542178', siteId: 1948789, note: '15% 마닐라' }
+  ];
+
   const DEFAULTS = {
     highlight: false,
     autoSelect: false,
@@ -40,19 +62,23 @@
     currencyAuto: false,
     watchPrice: false,
     cidFix: true,
+    autoRedeem: false,
     taxFactor: 1.265,
     promoList: [
       'OAWAGODA', 'OAWACTIVITY', 'AWESAMAGODA', 'AGODA2026', 'NEWUSER8',
       'JPKR88', 'JOSHDELACRUZ', 'ROLDAGODA', 'THELUDOVICES', 'ENZOAGODA',
       'JOSHAGODA', 'ROLDFAGODA', 'HELLOAGODA5', 'AGODADEAL8', 'AGODAENZO',
       'AL5', 'ACTFORYOU', 'SORALAGODA', 'INATOTRAVEL', 'SINGTEL6OFF',
-      'TEAMLUDOVICE', 'HELLOCAMZ'
+      'TEAMLUDOVICE', 'HELLOCAMZ',
+      'NEW12AGD1', 'NEW12AGD2', 'NEW14AGD1', 'AGDLK2026', 'LPAGDKR10',
+      'UPI12', 'UPI15', 'GODASALE', 'LP12AGD2', 'LP10AGD2', 'AGD8',
+      'AGODADEAL5', 'DRIVETRAVEL'
     ],
     favoriteCurrencies: ['KRW', 'JPY', 'USD', 'EUR', 'THB', 'IDR', 'VND', 'PHP', 'MYR', 'SGD']
   };
   const settings = Object.assign({}, DEFAULTS, store.get('settings', {}));
   const saveSettings = () => store.set('settings', settings);
-  const SAFE_SETTINGS_VERSION = '1.9.5';
+  const SAFE_SETTINGS_VERSION = '1.9.9';
   if (store.get('safe-settings-version', null) !== SAFE_SETTINGS_VERSION) {
     // Older releases enabled DOM mutation, coupon attempts and booking clicks by
     // default. Disable those persisted switches once; CID price comparison stays on.
@@ -61,6 +87,7 @@
     settings.promoHunt = false;
     settings.currencyAuto = false;
     settings.watchPrice = false;
+    settings.autoRedeem = false;
     saveSettings();
     store.set('safe-settings-version', SAFE_SETTINGS_VERSION);
   }
@@ -1725,6 +1752,55 @@
     return m ? m[1].toUpperCase() : null;
   }
 
+  const REDEEM_DONE_KEY = 'nyx-redeem-done';
+
+  async function scanWallet() {
+    try {
+      const r = await fetch('/api/gw/promocode/v1/wallet/list', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'ag-initiator-api-key': 'b3949fd5-9553-4b4e-b221-48be2a1b84a8', 'ag-initiator-version': '6_0' },
+        body: '{}'
+      });
+      const j = await r.json();
+      if (!j || !Array.isArray(j.walletData)) return [];
+      return j.walletData.filter(w => w);
+    } catch (e) {
+      return [];
+    }
+  }
+
+  async function redeemAllCampaigns({ force = false } = {}) {
+    try {
+      if (!force && sessionStorage.getItem(REDEEM_DONE_KEY)) {
+        notify('이번 세션에서 이미 캠페인 활성화 시도했어');
+        return;
+      }
+      if (force) sessionStorage.removeItem(REDEEM_DONE_KEY);
+      let ok = 0;
+      for (const c of CAMPAIGNS) {
+        try {
+          const r = await fetch('/promotion/redeem?cinfo=' + c.cinfo, {
+            method: 'GET', credentials: 'include',
+            headers: { 'ag-cid': '1895693', 'ag-language-locale': 'en-us' }
+          });
+          if (r.ok) ok++;
+        } catch (e) {}
+        await sleep(600);
+      }
+      sessionStorage.setItem(REDEEM_DONE_KEY, '1');
+      const wallet = await scanWallet();
+      notify(`캠페인 활성화 시도 ${ok}/${CAMPAIGNS.length}개 — 지갑 쿠폰 ${wallet.length}개`);
+      if (wallet.length > 0) {
+        for (const w of wallet.slice(0, 5)) {
+          const t = [w.code, w.campaignName, w.displayValue, w.discountType && w.discountValue !== undefined ? `${w.discountType}/${w.discountValue}` : null]
+            .filter(Boolean).join(' ');
+          if (t) notify(`지갑: ${t}`);
+        }
+      }
+      return wallet;
+    } catch (e) {}
+  }
+
   function switchCurrency(code) {
     const url = new URL(location.href);
     url.searchParams.set('curr', code);
@@ -1819,7 +1895,7 @@
     panel.id = 'nyx-agoda-panel';
     panel.innerHTML = `
       <div id="nyx-agoda-panel-head">
-        <span>🏷 아고다 최저가 v1.9.8</span>
+        <span>🏷 아고다 최저가 v1.9.9</span>
         <button id="nyx-agoda-collapse" title="접기">—</button>
       </div>
       <div id="nyx-agoda-panel-body">
@@ -1829,6 +1905,7 @@
           <label><input type="checkbox" id="nyx-agoda-cfg-promo" ${settings.promoHunt ? 'checked' : ''}> 쿠폰 자동시도</label>
           <label><input type="checkbox" id="nyx-agoda-cfg-watch" ${settings.watchPrice ? 'checked' : ''}> 가격변동 감지</label>
           <label><input type="checkbox" id="nyx-agoda-cfg-cid" ${settings.cidFix ? 'checked' : ''}> 저가 채널(cid) 자동적용</label>
+          <label><input type="checkbox" id="nyx-agoda-cfg-redeem" ${settings.autoRedeem ? 'checked' : ''}> 캠페인 쿠폰 자동활성화</label>
         </div>
         <div id="nyx-agoda-currency">
           <select id="nyx-agoda-curr-sel">
@@ -1841,6 +1918,7 @@
           <button id="nyx-agoda-book-now">🎯 최저가 바로 예약</button>
           <button id="nyx-agoda-cid-rescan">🔎 실사용 CID ${ACTIVE_CIDS.length}개 검사</button>
           <button id="nyx-agoda-promo-run">🎟 쿠폰 지금 시도</button>
+          <button id="nyx-agoda-redeem-run">💳 캠페인 쿠폰 활성화</button>
           <button id="nyx-agoda-promo-edit">쿠폰 목록 편집</button>
         </div>
         <textarea id="nyx-agoda-promo-list" style="display:none" rows="4" placeholder="쿠폰 코드 한 줄에 하나"></textarea>
@@ -1880,6 +1958,14 @@
       settings.cidFix = e.target.checked; saveSettings();
       notify(settings.cidFix ? '저가 채널 자동적용 켜짐' : '저가 채널 자동적용 꺼짐');
       if (settings.cidFix) ensureCheapCid();
+    });
+    panel.querySelector('#nyx-agoda-cfg-redeem').addEventListener('change', e => {
+      settings.autoRedeem = e.target.checked; saveSettings();
+      notify(settings.autoRedeem ? '캠페인 쿠폰 자동활성화 켜짐' : '캠페인 쿠폰 자동활성화 꺼짐');
+      if (settings.autoRedeem) redeemAllCampaigns();
+    });
+    panel.querySelector('#nyx-agoda-redeem-run').addEventListener('click', () => {
+      redeemAllCampaigns({ force: true });
     });
     panel.querySelector('#nyx-agoda-curr-sel').addEventListener('change', e => {
       if (e.target.value) switchCurrency(e.target.value);
@@ -2029,18 +2115,22 @@
     if (settings.cidFix && isPropertyPage()) {
       setTimeout(() => { ensureCheapCid(); }, 4000);
     }
+    if (settings.autoRedeem) {
+      setTimeout(() => { redeemAllCampaigns(); }, 6000);
+    }
   }
 
   try {
     Object.defineProperty(window, '__NYX_AGODA__', {
       configurable: true,
       value: Object.freeze({
-        version: '1.9.8',
+        version: '1.9.9',
         getState: () => ({
           criteria: probeContext(), status: Object.assign({}, cidStatus),
           cache: getCidCache(), registryVersion: CID_REGISTRY_VERSION,
           safeSettingsVersion: SAFE_SETTINGS_VERSION, fastCidCount: FAST_CIDS.length,
           activeCidCount: ACTIVE_CIDS.length, publicObservedCidCount: PUBLIC_OBSERVED_CIDS.length,
+          campaignCount: CAMPAIGNS.length, promoListCount: settings.promoList.length,
           candidateCount: buildProbeList(probeContext()).length,
           captured: { roomGrid: !!capturedRoomGridTemplate, secondary: !!capturedLegacyTemplate }
         }),

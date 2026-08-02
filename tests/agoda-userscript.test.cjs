@@ -56,7 +56,7 @@ vm.runInContext(source, context, { filename: 'agoda-userscript.user.js' });
 
 const api = context.__NYX_AGODA__;
 assert(api, 'debug/test API should be exposed');
-assert.equal(api.version, '1.9.1');
+assert.equal(api.version, '1.9.2');
 
 const active = api.test.activeCids();
 const observed = api.test.publicObservedCids();

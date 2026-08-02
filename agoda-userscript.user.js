@@ -1,14 +1,14 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.9.5
+// @version      1.9.6
 // @description  전 세계 아고다 숙소 최저가 도우미 — 안전한 CID 비교/재검증, 2인 유효 최저가, 세금포함 총액, 수동 1클릭 예약
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
 // @match        https://m.agoda.com/*
-// @updateURL    https://github.com/ad2das/agoda-lowest-price/raw/refs/heads/main/agoda-userscript.user.js
-// @downloadURL  https://github.com/ad2das/agoda-lowest-price/raw/refs/heads/main/agoda-userscript.user.js
+// @updateURL    https://raw.githubusercontent.com/ad2das/agoda-lowest-price/main/agoda-userscript.user.js
+// @downloadURL  https://raw.githubusercontent.com/ad2das/agoda-lowest-price/main/agoda-userscript.user.js
 // @homepageURL  https://github.com/ad2das/agoda-lowest-price
 // @supportURL   https://github.com/ad2das/agoda-lowest-price/issues
 // @run-at       document-start
@@ -1201,7 +1201,7 @@
       const ctx = await waitForProbeContext(true);
       if (!ctx || !ctx.hotelId || !ctx.checkIn) {
         cidStatus = { phase: 'error', done: 0, total: 0, source: null };
-        notify('cid 검색 실패 — 객실 가격 API가 아직 없어. 객실 목록이 보인 뒤 [실사용 CID 180개 검사]를 눌러줘');
+        notify(`cid 검색 실패 — 객실 가격 API가 아직 없어. 객실 목록이 보인 뒤 [실사용 CID ${ACTIVE_CIDS.length}개 검사]를 눌러줘`);
         return;
       }
       const startSignature = criteriaSignature(ctx);
@@ -1819,7 +1819,7 @@
     panel.id = 'nyx-agoda-panel';
     panel.innerHTML = `
       <div id="nyx-agoda-panel-head">
-        <span>🏷 아고다 최저가 v1.9.4</span>
+        <span>🏷 아고다 최저가 v1.9.6</span>
         <button id="nyx-agoda-collapse" title="접기">—</button>
       </div>
       <div id="nyx-agoda-panel-body">
@@ -1839,7 +1839,7 @@
         </div>
         <div id="nyx-agoda-actions">
           <button id="nyx-agoda-book-now">🎯 최저가 바로 예약</button>
-          <button id="nyx-agoda-cid-rescan">🔎 실사용 CID 180개 검사</button>
+          <button id="nyx-agoda-cid-rescan">🔎 실사용 CID ${ACTIVE_CIDS.length}개 검사</button>
           <button id="nyx-agoda-promo-run">🎟 쿠폰 지금 시도</button>
           <button id="nyx-agoda-promo-edit">쿠폰 목록 편집</button>
         </div>
@@ -2029,7 +2029,7 @@
     Object.defineProperty(window, '__NYX_AGODA__', {
       configurable: true,
       value: Object.freeze({
-        version: '1.9.5',
+        version: '1.9.6',
         getState: () => ({
           criteria: probeContext(), status: Object.assign({}, cidStatus),
           cache: getCidCache(), registryVersion: CID_REGISTRY_VERSION,

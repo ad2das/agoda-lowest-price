@@ -56,7 +56,7 @@ vm.runInContext(source, context, { filename: 'agoda-userscript.user.js' });
 
 const api = context.__NYX_AGODA__;
 assert(api, 'debug/test API should be exposed');
-assert.equal(api.version, '1.9.5');
+assert.equal(api.version, '1.9.6');
 assert.equal(api.getState().safeSettingsVersion, '1.9.5');
 assert(api.getState().candidateCount < 60, 'automatic scan must stay on the safe shortlist');
 assert(!source.includes('function autoSelectLowest('), 'the script must never auto-click a booking button');

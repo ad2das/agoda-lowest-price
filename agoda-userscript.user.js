@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.6.0
-// @description  전 세계 아고다 숙소 최저가 도우미 — 2인 유효 최저가 자동 선택(다국어), 저가 채널(cid) 자동 적용, 1클릭 예약, 세금포함 총액, 쿠폰 자동시도, 가격 변동 감지
+// @version      1.8.0
+// @description  전 세계 아고다 숙소 최저가 도우미 — 전 범위 적응형 CID 탐색/재검증, 2인 유효 최저가 자동 선택, 세금포함 총액, 쿠폰 자동시도
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
@@ -12,6 +12,7 @@
 // @homepageURL  https://github.com/ad2das/agoda-lowest-price
 // @supportURL   https://github.com/ad2das/agoda-lowest-price/issues
 // @run-at       document-start
+// @inject-into  page
 // @noframes
 // @grant        none
 // ==/UserScript==
@@ -51,6 +52,7 @@
   };
   const settings = Object.assign({}, DEFAULTS, store.get('settings', {}));
   const saveSettings = () => store.set('settings', settings);
+  const nativeFetch = typeof window.fetch === 'function' ? window.fetch : null;
   hookCidCapture();
 
   const CURRENCY_SYMBOLS = {
@@ -81,48 +83,67 @@
   const NOISE_RE = /UserEngagement|Review|breadcrumb|ScreenReaderOnly|StickyNav|이용후기|리뷰|レビュー|후기/i;
   const CELL_FP_RE = /1박당|per\s*night|1泊|총액|total/i;
 
-  const DEFAULT_CID = 10000;
+  const DEFAULT_CID = -1;
   const CID_FIXED_FLAG = 'nyx-cid-fixed-from';
-  const CID_CACHE_TTL = 6 * 60 * 60 * 1000;
+  const CID_CACHE_TTL = 30 * 60 * 1000;
+  const CID_CONCURRENCY = 4;
+  const CID_REQUEST_TIMEOUT = 12000;
+  const CID_REQUEST_INTERVAL = 200;
+  const CID_RANGE_MAX = 9999999;
+  const CID_RANGE_SAMPLE_COUNT = 48;
+  const CID_MAX_CANDIDATES = 150;
+  const CID_VERIFY_ROUNDS = 2;
 
   const PROBE_POOL = (() => {
-    const pool = new Set();
-    [101, 501, 1000, 5000, 9900].forEach(c => pool.add(c));
-    for (let c = 10000; c <= 98000; c += 2000) pool.add(c);
-    for (let c = 100000; c <= 285000; c += 25000) pool.add(c);
-    [10000, 10400, 11500, 11600, 16100, 16300, 16500, 17200, 17500, 23100, 25200, 25400, 25600, 26000, 27000, 28300, 29300, 31200, 31900, 33200, 36400, 38000, 40400, 41100, 44800, 46300, 48400, 63700, 65000, 66800, 68300, 75000, 78800, 79600, 80400, 82100, 120000, 150000, 190838, 210000, 255000, 285000].forEach(c => pool.add(c));
+    const pool = new Set([
+      -1, 2, 101, 501, 1000, 5000, 9900, 10000, 10400, 11500, 11600,
+      16001, 16100, 16300, 16500, 17200, 17500,
+      23100, 25200, 25400, 25600, 26000, 27000, 28300, 29300, 31200, 31900,
+      33200, 36400, 38000, 40400, 41100, 44800, 46300, 47999, 48000, 48400,
+      63700, 65000, 66800, 68300, 75000, 78800, 79600, 80400, 82100, 120000,
+      150000, 190838, 210000, 255000, 285000, 500000, 750000, 1000000,
+      1100000, 1234567, 1500000, 1800000, 1844103, 1844104, 1844105,
+      2000000, 2500000, 3000000, 5000000, 7500000, 9000000, 9999999
+    ]);
     return [...pool];
   })();
 
+  let capturedLegacyTemplate = null;
+  let capturedRoomGridTemplate = null;
+  let cidSweepPromise = null;
+  let cidStatus = { phase: 'idle', done: 0, total: 0, source: null };
+  let cidNextRequestAt = 0;
+
+  function normalizeCid(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const n = Number(value);
+    return Number.isInteger(n) && n >= -1 && n <= CID_RANGE_MAX ? n : null;
+  }
+
   function currentCid() {
-    const m = location.search.match(/[?&]cid=(\d+)/);
-    return m ? parseInt(m[1], 10) : null;
+    try { return normalizeCid(new URL(location.href).searchParams.get('cid')); }
+    catch (e) { return null; }
   }
 
   function isPropertyPage() {
     return /\/hotel\/|\/property\//.test(location.pathname);
   }
 
-  function cidCacheKey() {
-    const m = location.pathname.match(/^\/(?:[a-z]{2}-[a-z]{2}\/)?([^/]+)\/hotel\//) || location.pathname.match(/^\/(?:[a-z]{2}-[a-z]{2}\/)?([^/]+)\/property\//);
-    return m ? 'cid:' + m[1] : null;
+  function requestUrl(input) {
+    if (typeof input === 'string' || input instanceof URL) return String(input);
+    return input && typeof input.url === 'string' ? input.url : '';
   }
 
-  function getCidCache() {
-    const key = cidCacheKey();
-    if (!key) return null;
-    const c = store.get(key, null);
-    if (!c || !c.ts || Date.now() - c.ts > CID_CACHE_TTL) return null;
-    return c;
+  function pickedHeaders(source) {
+    const out = {};
+    try {
+      const headers = new Headers(source || {});
+      ['ag-cid', 'ag-initiator-api-key', 'ag-initiator-version', 'ag-language-locale',
+        'ag-request-attempt', 'ag-retry-attempt', 'ag-user-id', 'x-gate-meta']
+        .forEach(k => { const v = headers.get(k); if (v) out[k] = v; });
+    } catch (e) {}
+    return out;
   }
-
-  function setCidCache(data) {
-    const key = cidCacheKey();
-    if (!key) return;
-    store.set(key, Object.assign({ ts: Date.now() }, data));
-  }
-
-  let capturedCidParams = null;
 
   function captureCidParamsFrom(urlStr) {
     if (!urlStr || !urlStr.includes('GetSecondaryData')) return;
@@ -130,150 +151,581 @@
       const u = new URL(urlStr, location.href);
       const params = u.searchParams;
       if (!params.get('hotel_id')) return;
-      capturedCidParams = {
-        checkIn: params.get('checkIn') || '',
-        los: params.get('los') || '1',
-        rooms: params.get('rooms') || '1',
-        adults: params.get('adults') || '2',
-        children: params.get('children') || '0',
-        curr: params.get('curr') || '',
-        hotel_id: params.get('hotel_id')
+      capturedLegacyTemplate = {
+        url: u.pathname + u.search,
+        hotelId: params.get('hotel_id'),
+        cid: normalizeCid(params.get('cid')),
+        capturedAt: Date.now()
       };
+    } catch (e) {}
+  }
+
+  function saveRoomGridTemplate(urlStr, headers, bodyText) {
+    try {
+      const body = typeof bodyText === 'string' ? JSON.parse(bodyText) : bodyText;
+      if (!body || !body.propertyId || !body.searchCriteria) return;
+      const u = new URL(urlStr, location.href);
+      capturedRoomGridTemplate = {
+        url: u.pathname + u.search,
+        body: JSON.parse(JSON.stringify(body)),
+        headers: pickedHeaders(headers),
+        hotelId: String(body.propertyId),
+        cid: normalizeCid(new Headers(headers || {}).get('ag-cid')),
+        capturedAt: Date.now()
+      };
+    } catch (e) {}
+  }
+
+  function captureCidRequest(input, init) {
+    const url = requestUrl(input);
+    if (!url) return;
+    captureCidParamsFrom(url);
+    if (!url.includes('/api/v1/property/room-grid')) return;
+    try {
+      const request = typeof Request !== 'undefined' && input instanceof Request ? input : null;
+      const headers = (init && init.headers) || (request && request.headers) || {};
+      const directBody = init && init.body;
+      if (typeof directBody === 'string') saveRoomGridTemplate(url, headers, directBody);
+      else if (request) request.clone().text().then(t => saveRoomGridTemplate(url, headers, t)).catch(() => {});
     } catch (e) {}
   }
 
   function hookCidCapture() {
     try {
-      const origFetch = window.fetch;
-      if (origFetch) {
+      if (nativeFetch) {
         window.fetch = function (...args) {
-          captureCidParamsFrom(typeof args[0] === 'string' ? args[0] : args[0] && args[0].url);
-          return origFetch.apply(this, args);
+          captureCidRequest(args[0], args[1]);
+          return nativeFetch.apply(this, args);
         };
       }
     } catch (e) {}
     try {
+      const xhrMeta = new WeakMap();
       const origOpen = XMLHttpRequest.prototype.open;
+      const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+      const origSend = XMLHttpRequest.prototype.send;
       XMLHttpRequest.prototype.open = function (method, url) {
+        xhrMeta.set(this, { url: String(url || ''), headers: {} });
         captureCidParamsFrom(url);
         return origOpen.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+        const meta = xhrMeta.get(this);
+        if (meta) meta.headers[name] = value;
+        return origSetHeader.apply(this, arguments);
+      };
+      XMLHttpRequest.prototype.send = function (body) {
+        const meta = xhrMeta.get(this);
+        if (meta && meta.url.includes('/api/v1/property/room-grid') && typeof body === 'string') {
+          saveRoomGridTemplate(meta.url, meta.headers, body);
+        }
+        return origSend.apply(this, arguments);
       };
     } catch (e) {}
   }
 
   function hotelIdFromDom() {
     try {
-      const m = document.documentElement.innerHTML.match(/"hotelId"\s*:\s*(\d+)/) || document.documentElement.innerHTML.match(/hotel_id=(\d+)/);
+      const html = document.documentElement.innerHTML;
+      const m = html.match(/"(?:hotelId|propertyId)"\s*:\s*"?(\d+)"?/) || html.match(/hotel_id=(\d+)/);
       if (m) return m[1];
     } catch (e) {}
     return null;
   }
 
-  function probeParams() {
-    if (capturedCidParams && capturedCidParams.hotel_id) return capturedCidParams;
+  function urlCriteria() {
+    const q = new URL(location.href).searchParams;
+    return {
+      checkIn: q.get('checkIn') || q.get('checkin') || '',
+      checkOut: q.get('checkOut') || q.get('checkout') || '',
+      los: q.get('los') || '1',
+      rooms: q.get('rooms') || '1',
+      adults: q.get('adults') || '2',
+      children: q.get('children') || '0',
+      curr: (q.get('curr') || '').toUpperCase()
+    };
+  }
+
+  function pageCurrencyKey() {
+    const fromUrl = urlCriteria().curr;
+    if (fromUrl) return fromUrl;
+    try {
+      const m = document.cookie.match(/(?:^|;\s*)agoda\.version\.03=([^;]+)/);
+      const label = m && decodeURIComponent(m[1]).match(/(?:^|&)CurLabel=([^&]+)/i);
+      if (label) return label[1].toUpperCase();
+    } catch (e) {}
+    return '';
+  }
+
+  function probeContext() {
+    const fromUrl = urlCriteria();
+    if (capturedRoomGridTemplate) {
+      const b = capturedRoomGridTemplate.body;
+      const sc = b.searchCriteria || {};
+      const ages = sc.childrenAges || sc.childAges || [];
+      return {
+        source: 'room-grid', hotelId: String(b.propertyId),
+        checkIn: sc.checkIn || fromUrl.checkIn,
+        checkOut: sc.checkOut || fromUrl.checkOut,
+        los: fromUrl.los, rooms: String(sc.rooms || fromUrl.rooms),
+        adults: String(sc.adults || fromUrl.adults),
+        children: String(Array.isArray(ages) ? ages.length : (sc.children || fromUrl.children)),
+        curr: pageCurrencyKey() || String((b.userContext && b.userContext.currencyId) || ''),
+        activeCid: capturedRoomGridTemplate.cid ?? currentCid() ?? DEFAULT_CID
+      };
+    }
+    if (capturedLegacyTemplate) {
+      const q = new URL(capturedLegacyTemplate.url, location.href).searchParams;
+      return {
+        source: 'secondary', hotelId: capturedLegacyTemplate.hotelId,
+        checkIn: q.get('checkIn') || fromUrl.checkIn,
+        checkOut: q.get('checkOut') || fromUrl.checkOut,
+        los: q.get('los') || fromUrl.los, rooms: q.get('rooms') || fromUrl.rooms,
+        adults: q.get('adults') || fromUrl.adults,
+        children: q.get('children') || fromUrl.children,
+        curr: (q.get('curr') || pageCurrencyKey() || '').toUpperCase(),
+        activeCid: capturedLegacyTemplate.cid ?? currentCid() ?? DEFAULT_CID
+      };
+    }
     const hid = hotelIdFromDom();
-    if (hid) {
-      return { checkIn: '', los: '1', rooms: '1', adults: '2', children: '0', curr: '', hotel_id: hid };
-    }
-    return null;
+    if (!hid) return null;
+    return Object.assign({ source: 'secondary', hotelId: hid, activeCid: currentCid() ?? DEFAULT_CID }, fromUrl);
   }
 
-  async function probeCidTotal(cid) {
-    const p = probeParams();
-    if (!p) return null;
-    const q = [
-      p.checkIn ? 'checkIn=' + p.checkIn : '',
-      'los=' + p.los, 'rooms=' + p.rooms, 'adults=' + p.adults,
-      p.children ? 'children=' + p.children : '',
-      p.curr ? 'curr=' + p.curr : '',
-      'hotel_id=' + p.hotel_id,
-      'all=false&isHostPropertiesEnabled=false&price_view=1&sessionid=x&pagetypeid=7&attributionInfos=32%7C-1&cid=' + cid
-    ].filter(Boolean).join('&');
-    const u = '/api/cronos/property/BelowFoldParams/GetSecondaryData?' + q;
-    for (let t = 0; t < 3; t++) {
+  function criteriaSignature(ctx = probeContext()) {
+    if (!ctx || !ctx.hotelId) return null;
+    let stayLength = Number(ctx.los) || 1;
+    if (ctx.checkIn && ctx.checkOut) {
+      const start = Date.parse(ctx.checkIn), end = Date.parse(ctx.checkOut);
+      if (Number.isFinite(start) && Number.isFinite(end) && end > start) stayLength = Math.round((end - start) / 86400000);
+    }
+    return [ctx.hotelId, ctx.checkIn, stayLength, ctx.rooms, ctx.adults, ctx.children, ctx.curr]
+      .map(v => encodeURIComponent(String(v || ''))).join('|');
+  }
+
+  function cidCacheKey(ctx = probeContext()) {
+    const sig = criteriaSignature(ctx);
+    return sig ? 'cid:v2:' + sig : null;
+  }
+
+  function getCidCache(ctx = probeContext()) {
+    const key = cidCacheKey(ctx);
+    if (!key) return null;
+    const c = store.get(key, null);
+    if (!c || c.cacheVersion !== 3 || !c.ts || !c.verifiedAt || Date.now() - c.ts > CID_CACHE_TTL) return null;
+    return c;
+  }
+
+  function setCidCache(data, ctx = probeContext()) {
+    const key = cidCacheKey(ctx);
+    if (key) store.set(key, Object.assign({ ts: Date.now(), criteria: criteriaSignature(ctx) }, data));
+  }
+
+  function clearCidCache(ctx = probeContext()) {
+    const key = cidCacheKey(ctx);
+    if (!key) return;
+    try { localStorage.removeItem(NAME + ':' + key); } catch (e) {}
+  }
+
+  function rememberedCids() {
+    const list = store.get('cid:winners', []);
+    return Array.isArray(list) ? list.map(normalizeCid).filter(v => v !== null) : [];
+  }
+
+  function rememberCid(cid) {
+    cid = normalizeCid(cid);
+    if (cid === null) return;
+    const list = [cid, ...rememberedCids().filter(v => v !== cid)].slice(0, 30);
+    store.set('cid:winners', list);
+  }
+
+  function visiblePageCids() {
+    const found = [];
+    try {
+      document.querySelectorAll('a[href*="cid="]').forEach(a => {
+        if (found.length >= 50) return;
+        const cid = normalizeCid(new URL(a.href, location.href).searchParams.get('cid'));
+        if (cid !== null) found.push(cid);
+      });
+    } catch (e) {}
+    return found;
+  }
+
+  function hashString(value) {
+    let hash = 2166136261;
+    for (let i = 0; i < value.length; i++) {
+      hash ^= value.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  }
+
+  function seededRandom(seed) {
+    return () => {
+      seed |= 0;
+      seed = seed + 0x6D2B79F5 | 0;
+      let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  function stratifiedRangeCids(ctx, salt, count = CID_RANGE_SAMPLE_COUNT) {
+    const random = seededRandom(hashString((criteriaSignature(ctx) || location.pathname) + '|' + salt));
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const start = Math.max(1, Math.floor(i * CID_RANGE_MAX / count));
+      const end = Math.max(start, Math.floor((i + 1) * CID_RANGE_MAX / count) - 1);
+      out.push(start + Math.floor(random() * (end - start + 1)));
+    }
+    return out;
+  }
+
+  function neighboringCids(cid) {
+    cid = normalizeCid(cid);
+    if (cid === null || cid < 0) return [];
+    return [-1000, -100, -10, -2, -1, 1, 2, 10, 100, 1000]
+      .map(offset => normalizeCid(cid + offset)).filter(v => v !== null);
+  }
+
+  function buildProbeList(ctx, salt = Math.floor(Date.now() / CID_CACHE_TTL)) {
+    const cids = new Set();
+    const add = value => { value = normalizeCid(value); if (value !== null) cids.add(value); };
+    [ctx && ctx.activeCid, currentCid(), capturedLegacyTemplate && capturedLegacyTemplate.cid,
+      capturedRoomGridTemplate && capturedRoomGridTemplate.cid].forEach(add);
+    const remembered = rememberedCids().slice(0, 10);
+    remembered.forEach(add);
+    visiblePageCids().forEach(add);
+    PROBE_POOL.forEach(add);
+    stratifiedRangeCids(ctx, salt).forEach(add);
+    [1844104, ...remembered.slice(0, 2)].flatMap(neighboringCids).forEach(add);
+    return [...cids].slice(0, CID_MAX_CANDIDATES);
+  }
+
+  async function fetchJson(url, init = {}, attempts = 2) {
+    const fetcher = nativeFetch || window.fetch;
+    if (!fetcher) throw new Error('fetch unavailable');
+    let lastError = null;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const slot = Math.max(Date.now(), cidNextRequestAt);
+      cidNextRequestAt = slot + CID_REQUEST_INTERVAL + Math.floor(Math.random() * 50);
+      if (slot > Date.now()) await sleep(slot - Date.now());
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), CID_REQUEST_TIMEOUT);
       try {
-        const r = await fetch(u, { headers: { accept: 'application/json' } });
-        if (r.status !== 200) { await sleep(600); continue; }
-        const j = await r.json();
-        let best = null;
-        for (const mr of (j.roomGridData.masterRooms || [])) for (const rm of (mr.rooms || [])) {
-          if (rm.occupancy !== 2) continue;
-          const v = rm.totalPrice && rm.totalPrice.display;
-          if (typeof v === 'number' && (best === null || v < best)) best = v;
+        const r = await fetcher.call(window, url, Object.assign({ credentials: 'same-origin', cache: 'no-store' }, init, { signal: controller.signal }));
+        if (!r.ok) {
+          const error = new Error('HTTP ' + r.status);
+          error.status = r.status;
+          throw error;
         }
-        return best;
-      } catch (e) { await sleep(600); }
+        return await r.json();
+      } catch (e) {
+        lastError = e;
+        if (attempt + 1 < attempts) await sleep(500 * (attempt + 1) + Math.random() * 300);
+      } finally { clearTimeout(timer); }
     }
-    return null;
+    throw lastError || new Error('request failed');
   }
 
-  async function runCidSweep(onProgress) {
-    const cids = new Set(PROBE_POOL);
-    const cur = currentCid();
-    if (cur !== null) cids.add(cur);
-    cids.add(2);
-    const list = [...cids];
+  function numericAmount(value) {
+    if (typeof value === 'number') return Number.isFinite(value) && value > 0 ? value : null;
+    if (typeof value !== 'string') return null;
+    let s = value.replace(/[^\d.,-]/g, '');
+    if (!s) return null;
+    const lastDot = s.lastIndexOf('.'), lastComma = s.lastIndexOf(',');
+    const decimalAt = Math.max(lastDot, lastComma);
+    if (decimalAt >= 0 && s.length - decimalAt - 1 <= 2) {
+      const whole = s.slice(0, decimalAt).replace(/[.,]/g, '');
+      const fraction = s.slice(decimalAt + 1).replace(/[.,]/g, '');
+      s = whole + '.' + fraction;
+    } else s = s.replace(/[.,]/g, '');
+    const n = Number(s);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+
+  function extractModernTotal(j) {
+    const values = [];
+    for (const room of (j && j.rooms || [])) {
+      if (room.isOccupancyExceeded === true) continue;
+      for (const offer of (room.offers || [])) {
+        const v = numericAmount(offer.analyticsContext && offer.analyticsContext.hotel_price_per_book);
+        if (v !== null) values.push(v);
+      }
+    }
+    const cheapest = numericAmount(j && j.cheapestPrice && j.cheapestPrice.analyticsContext && j.cheapestPrice.analyticsContext.hotel_price_per_book);
+    if (cheapest !== null) values.push(cheapest);
+    return values.length ? Math.min(...values) : null;
+  }
+
+  function extractLegacyTotal(j, ctx) {
+    const values = [];
+    const adults = Number(ctx.adults) || 2;
+    for (const master of (j && j.roomGridData && j.roomGridData.masterRooms || [])) {
+      for (const room of (master.rooms || [])) {
+        const occupancy = Number(room.occupancy || room.adults || 0);
+        if (room.isFit === false || (occupancy && occupancy < adults) || Number(room.availability) === 0) continue;
+        const candidates = [
+          room.pricing && room.pricing.displaySummary && room.pricing.displaySummary.perBook && room.pricing.displaySummary.perBook.displayTotal && room.pricing.displaySummary.perBook.displayTotal.allInclusive,
+          room.paymentOption && room.paymentOption.amountPayNow,
+          room.totalPrice && room.totalPrice.display,
+          room.inclusivePrice
+        ];
+        const v = candidates.map(numericAmount).find(x => x !== null);
+        if (v !== undefined) values.push(v);
+      }
+    }
+    return values.length ? Math.min(...values) : null;
+  }
+
+  function modernProbeHeaders(template, cid) {
+    const headers = Object.assign({}, template.headers, { 'ag-cid': String(cid), 'content-type': 'application/json' });
+    const uid = headers['ag-user-id'];
+    try { if (uid) headers['x-gate-meta'] = btoa(`${Date.now()}|${uid}|${new URL(template.url, location.href).pathname}`); }
+    catch (e) {}
+    return headers;
+  }
+
+  async function probeModernCid(cid, ctx) {
+    const t = capturedRoomGridTemplate;
+    if (!t || String(t.hotelId) !== String(ctx.hotelId)) return { total: null, ok: false, status: 0 };
+    try {
+      const j = await fetchJson(t.url, {
+        method: 'POST', headers: modernProbeHeaders(t, cid),
+        body: JSON.stringify(t.body)
+      });
+      return { total: extractModernTotal(j), ok: true, status: 200 };
+    } catch (e) { return { total: null, ok: false, status: e.status || 0 }; }
+  }
+
+  function legacyProbeUrl(cid, ctx) {
+    let u;
+    if (capturedLegacyTemplate && String(capturedLegacyTemplate.hotelId) === String(ctx.hotelId)) {
+      u = new URL(capturedLegacyTemplate.url, location.href);
+    } else {
+      u = new URL('/api/cronos/property/BelowFoldParams/GetSecondaryData', location.href);
+      const q = u.searchParams;
+      if (ctx.checkIn) q.set('checkIn', ctx.checkIn);
+      if (ctx.checkOut) q.set('checkOut', ctx.checkOut);
+      q.set('los', ctx.los || '1'); q.set('rooms', ctx.rooms || '1');
+      q.set('adults', ctx.adults || '2'); q.set('children', ctx.children || '0');
+      if (ctx.curr && !/^\d+$/.test(ctx.curr)) q.set('curr', ctx.curr);
+      q.set('hotel_id', ctx.hotelId); q.set('all', 'false');
+      q.set('isHostPropertiesEnabled', 'true'); q.set('price_view', '0');
+      q.set('sessionid', 'x'); q.set('pagetypeid', '7'); q.set('attributionInfos', '32|-1');
+    }
+    u.searchParams.set('cid', String(cid));
+    return u.pathname + u.search;
+  }
+
+  async function probeLegacyCid(cid, ctx) {
+    try {
+      const j = await fetchJson(legacyProbeUrl(cid, ctx), { headers: { accept: 'application/json' } });
+      return { total: extractLegacyTotal(j, ctx), ok: true, status: 200 };
+    } catch (e) { return { total: null, ok: false, status: e.status || 0 }; }
+  }
+
+  async function runCidSweep(list, source, ctx, onProgress) {
     const results = new Map();
-    let done = 0;
-    const worker = async (items) => {
-      for (const cid of items) {
-        const total = await probeCidTotal(cid);
+    const stats = { attempted: 0, ok: 0, noPrice: 0, httpErrors: 0, stopped: false };
+    let next = 0, done = 0, consecutiveErrors = 0;
+    const worker = async () => {
+      while (true) {
+        if (stats.stopped) return;
+        const index = next++;
+        if (index >= list.length) return;
+        const cid = list[index];
+        const outcome = source === 'room-grid' ? await probeModernCid(cid, ctx) : await probeLegacyCid(cid, ctx);
+        const total = outcome.total;
+        stats.attempted++;
+        if (outcome.ok) {
+          stats.ok++;
+          consecutiveErrors = 0;
+          if (total === null) stats.noPrice++;
+        } else {
+          stats.httpErrors++;
+          consecutiveErrors++;
+          if (consecutiveErrors >= 8) stats.stopped = true;
+        }
         if (total !== null) results.set(cid, total);
         done++;
+        cidStatus = { phase: 'scanning', done, total: list.length, source };
         if (onProgress) onProgress(done, list.length, cid, total);
       }
     };
-    const chunks = [];
-    for (let i = 0; i < list.length; i += 8) chunks.push(list.slice(i, i + 8));
-    await Promise.all(chunks.map(worker));
-    return results;
+    await Promise.all(Array.from({ length: Math.min(CID_CONCURRENCY, list.length) }, () => worker()));
+    return { results, stats };
   }
 
-  async function ensureCheapCid() {
-    if (!settings.cidFix) return;
-    if (!isPropertyPage()) return;
-    const cache = getCidCache();
-    if (cache && cache.bestCid !== undefined) {
-      const cur = currentCid();
-      if (cache.bestCid === null || cur === cache.bestCid) return;
-      redirectToCid(cache.bestCid, cur);
-      return;
-    }
-    notify('저가 채널(cid) 스캔 시작...');
-    const results = await runCidSweep((done, total) => {
-      if (done % 25 === 0 || done === total) notify(`cid 스캔 ${done}/${total}...`);
+  async function verifyCidCandidates(results, source, ctx, activeCid) {
+    const ranked = [...results.entries()].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+    const candidates = [];
+    [activeCid, ...ranked.slice(0, 3).map(x => x[0])].forEach(cid => {
+      if (!candidates.includes(cid)) candidates.push(cid);
     });
-    if (results.size === 0) { notify('cid 스캔 실패 — 잠시 후 다시 시도해줘'); return; }
-    let bestCid = null, bestTotal = Infinity;
-    for (const [cid, total] of results) {
-      if (total < bestTotal) { bestTotal = total; bestCid = cid; }
+    const samples = new Map(candidates.map(cid => [cid, []]));
+    const total = candidates.length * CID_VERIFY_ROUNDS;
+    let done = 0;
+    cidStatus = { phase: 'verifying', done: 0, total, source };
+    notify(`최저 후보 재검증 — ${candidates.length}개 × ${CID_VERIFY_ROUNDS}회`);
+    for (let round = 0; round < CID_VERIFY_ROUNDS; round++) {
+      for (const cid of candidates) {
+        const outcome = source === 'room-grid' ? await probeModernCid(cid, ctx) : await probeLegacyCid(cid, ctx);
+        done++;
+        cidStatus = { phase: 'verifying', done, total, source };
+        if (!outcome.ok || outcome.total === null) return null;
+        samples.get(cid).push(outcome.total);
+      }
     }
-    const cur = currentCid();
-    const curTotal = results.get(cur !== null ? cur : 2);
-    const prices = [...new Set(results.values())];
-    if (prices.length === 1) {
-      setCidCache({ bestCid: null, bestTotal: bestTotal, noCheap: true });
-      notify(`이 호텔은 cid 별 가격 차이 없음 (${bestTotal})`);
-      return;
+    const verified = new Map();
+    for (const [cid, values] of samples) {
+      if (values.length !== CID_VERIFY_ROUNDS) return null;
+      verified.set(cid, values.reduce((sum, value) => sum + value, 0) / values.length);
     }
-    setCidCache({ bestCid, bestTotal, noCheap: false });
-    if (curTotal !== undefined && bestTotal >= curTotal) {
-      notify(`이미 최저 채널 (${curTotal})`);
-      return;
-    }
-    notify(`저가 채널 발견: cid ${bestCid} → ${bestTotal} (기존 ${curTotal !== undefined ? curTotal : '?'})`);
-    if (bestCid !== cur) redirectToCid(bestCid, cur);
+    return verified;
   }
 
-  function redirectToCid(cid, fromCid) {
+  async function waitForProbeContext() {
+    for (let i = 0; i < 30; i++) {
+      const ctx = probeContext();
+      if (ctx && ctx.hotelId && ctx.checkIn) return ctx;
+      await sleep(400);
+    }
+    return probeContext();
+  }
+
+  async function ensureCheapCid(options = {}) {
+    if (!settings.cidFix || !isPropertyPage()) return;
+    if (cidSweepPromise) return cidSweepPromise;
+    cidSweepPromise = (async () => {
+      const ctx = await waitForProbeContext();
+      if (!ctx || !ctx.hotelId || !ctx.checkIn) {
+        notify('cid 검색 실패 — 호텔/날짜 정보를 불러오지 못했어');
+        return;
+      }
+      const startSignature = criteriaSignature(ctx);
+      if (options.force) {
+        clearCidCache(ctx);
+        try { sessionStorage.removeItem(CID_FIXED_FLAG); } catch (e) {}
+      }
+      const cached = options.force ? null : getCidCache(ctx);
+      const activeCid = normalizeCid(ctx.activeCid) ?? DEFAULT_CID;
+      if (cached && cached.bestCid !== undefined) {
+        cidStatus = { phase: 'cached', done: cached.validCount || 0, total: cached.candidateCount || 0, source: cached.source };
+        if (cached.bestCid === null || cached.bestCid === activeCid) return;
+        notify(`저장된 최저 cid ${cached.bestCid} 적용`);
+        redirectToCid(cached.bestCid, activeCid, ctx);
+        return;
+      }
+
+      const list = buildProbeList(ctx, options.force ? Date.now() : undefined);
+      let source = capturedRoomGridTemplate && String(capturedRoomGridTemplate.hotelId) === String(ctx.hotelId) ? 'room-grid' : 'secondary';
+      notify(`저가 채널(cid) 검색 시작 — ${list.length}개, ${source === 'room-grid' ? '최신 API' : '호환 API'}`);
+      let sweep = await runCidSweep(list, source, ctx, (done, total) => {
+        if (done % 20 === 0 || done === total) notify(`cid 검색 ${done}/${total}...`);
+      });
+      let results = sweep.results;
+      let completed = sweep.stats.attempted === list.length && !sweep.stats.stopped;
+
+      const minimumValid = Math.max(3, Math.ceil(list.length * 0.15));
+      if (source === 'room-grid' && (!completed || results.size < minimumValid || !results.has(activeCid))) {
+        notify('최신 API 응답이 부족해 호환 API를 소수 표본으로 확인 중...');
+        const sampleList = [...new Set([activeCid, DEFAULT_CID, 2, 10000, 16100, 48000, ...rememberedCids()])]
+          .filter(cid => normalizeCid(cid) !== null).slice(0, 8);
+        source = 'secondary';
+        const sampleSweep = await runCidSweep(sampleList, source, ctx, (done, total) => {
+          if (done === total) notify(`호환 표본 ${done}/${total} 확인`);
+        });
+        if (sampleSweep.results.size >= 2 && sampleSweep.results.has(activeCid) && !sampleSweep.stats.stopped) {
+          const sampled = new Set(sampleList);
+          const remaining = list.filter(cid => !sampled.has(cid));
+          notify('호환 API 표본 정상 — 전체 후보 확인 중...');
+          const restSweep = await runCidSweep(remaining, source, ctx, (done, total) => {
+            if (done % 20 === 0 || done === total) notify(`호환 검색 ${done}/${total}...`);
+          });
+          results = new Map([...sampleSweep.results, ...restSweep.results]);
+          completed = sampleSweep.stats.attempted === sampleList.length &&
+            restSweep.stats.attempted === remaining.length && !restSweep.stats.stopped;
+        } else {
+          results = sampleSweep.results;
+          completed = false;
+        }
+      }
+
+      const scannedBaselineTotal = results.get(activeCid);
+      if (!completed || results.size < 2 || scannedBaselineTotal === undefined) {
+        cidStatus = { phase: 'error', done: results.size, total: list.length, source };
+        notify(`cid 검색 중단 — 서버 제한 또는 유효 응답 부족 (${results.size}/${list.length}), 잠시 후 다시 검색해줘`);
+        return;
+      }
+      if (criteriaSignature() !== startSignature) {
+        notify('검색 조건이 바뀌어 이전 cid 결과를 폐기했어');
+        return;
+      }
+
+      const verified = await verifyCidCandidates(results, source, ctx, activeCid);
+      if (!verified || !verified.has(activeCid)) {
+        cidStatus = { phase: 'error', done: results.size, total: list.length, source };
+        notify('최저 후보 재검증 실패 — 가격이 안정된 뒤 다시 검색해줘');
+        return;
+      }
+      if (criteriaSignature() !== startSignature) {
+        notify('재검증 중 검색 조건이 바뀌어 결과를 폐기했어');
+        return;
+      }
+
+      const baselineTotal = verified.get(activeCid);
+      let bestCid = activeCid, bestTotal = baselineTotal;
+      for (const [cid, total] of verified) {
+        if (total < bestTotal) { bestCid = cid; bestTotal = total; }
+      }
+      const priceKeys = new Set([...verified.values()].map(v => Number(v).toFixed(4)));
+      const epsilon = Math.max(0.01, baselineTotal * 0.0001);
+      const isBetter = bestTotal < baselineTotal - epsilon;
+      const noDifference = priceKeys.size === 1;
+      const cacheData = {
+        cacheVersion: 3,
+        bestCid: noDifference ? null : bestCid, bestTotal, baselineCid: activeCid,
+        baselineTotal, noCheap: !isBetter, source,
+        validCount: results.size, candidateCount: list.length,
+        verifiedCount: verified.size, verifiedAt: Date.now()
+      };
+      setCidCache(cacheData, ctx);
+      cidStatus = { phase: 'done', done: results.size, total: list.length, source };
+
+      if (noDifference) {
+        notify(`cid별 가격 차이 없음 — ${formatNum(bestTotal)} (${results.size}개 확인)`);
+        return;
+      }
+      if (!isBetter) {
+        rememberCid(activeCid);
+        notify(`현재 cid ${activeCid}가 최저 — ${formatNum(baselineTotal)}`);
+        return;
+      }
+      rememberCid(bestCid);
+      const saved = baselineTotal - bestTotal;
+      const percent = baselineTotal > 0 ? saved / baselineTotal * 100 : 0;
+      notify(`검증 최저 cid ${bestCid} 발견 — ${formatNum(bestTotal)} (${formatNum(saved)}, ${percent.toFixed(1)}% 절약)`);
+      redirectToCid(bestCid, activeCid, ctx);
+    })().finally(() => { cidSweepPromise = null; });
+    return cidSweepPromise;
+  }
+
+  function redirectToCid(cid, fromCid, ctx = probeContext()) {
     try {
+      const sig = criteriaSignature(ctx) || location.pathname;
+      const token = { sig, cid, ts: Date.now() };
+      const oldRaw = sessionStorage.getItem(CID_FIXED_FLAG);
+      const old = oldRaw ? JSON.parse(oldRaw) : null;
+      if (old && old.sig === sig && old.cid === cid && Date.now() - old.ts < 3 * 60 * 1000) {
+        notify('반복 이동을 막았어 — [CID 다시 검색]으로 재시도 가능');
+        return;
+      }
       const url = new URL(location.href);
       url.searchParams.set('cid', String(cid));
-      if (fromCid !== null && fromCid !== undefined) {
-        try { sessionStorage.setItem(CID_FIXED_FLAG, String(fromCid)); } catch (e) {}
-      }
+      sessionStorage.setItem(CID_FIXED_FLAG, JSON.stringify(token));
       location.replace(url.toString());
-    } catch (e) {}
+    } catch (e) { notify('cid URL 적용 실패: ' + e.message); }
   }
 
   function nightsFromUrl() {
@@ -694,6 +1146,7 @@
         </div>
         <div id="nyx-agoda-actions">
           <button id="nyx-agoda-book-now">🎯 최저가 바로 예약</button>
+          <button id="nyx-agoda-cid-rescan">🔎 CID 새 범위 검색</button>
           <button id="nyx-agoda-promo-run">🎟 쿠폰 지금 시도</button>
           <button id="nyx-agoda-promo-edit">쿠폰 목록 편집</button>
         </div>
@@ -735,7 +1188,8 @@
     });
     panel.querySelector('#nyx-agoda-cfg-cid').addEventListener('change', e => {
       settings.cidFix = e.target.checked; saveSettings();
-      notify(settings.cidFix ? '저가 채널 자동적용 켜짐 — 다음 방문부터 적용' : '저가 채널 자동적용 꺼짐');
+      notify(settings.cidFix ? '저가 채널 자동적용 켜짐' : '저가 채널 자동적용 꺼짐');
+      if (settings.cidFix) ensureCheapCid();
     });
     panel.querySelector('#nyx-agoda-curr-sel').addEventListener('change', e => {
       if (e.target.value) switchCurrency(e.target.value);
@@ -751,6 +1205,11 @@
     });
     panel.querySelector('#nyx-agoda-book-now').addEventListener('click', () => {
       bookLowestNow(collectPrices(document));
+    });
+    panel.querySelector('#nyx-agoda-cid-rescan').addEventListener('click', () => {
+      if (cidSweepPromise) { notify(`cid 검색 진행 중 ${cidStatus.done}/${cidStatus.total}`); return; }
+      clearCidCache();
+      ensureCheapCid({ force: true });
     });
     panel.querySelector('#nyx-agoda-promo-edit').addEventListener('click', () => {
       const ta = panel.querySelector('#nyx-agoda-promo-list');
@@ -786,8 +1245,9 @@
     const min = prices.length ? Math.min(...prices.map(p => p.price.value)) : null;
     const minP = prices.length ? prices.find(p => p.price.value === min) : null;
     const h = prices.length ? store.get('history:' + priceHistoryKey(), null) : null;
-    const cid = currentCid();
-    const cidCache = getCidCache();
+    const cidCtx = probeContext();
+    const cid = currentCid() ?? (cidCtx && cidCtx.activeCid);
+    const cidCache = getCidCache(cidCtx);
     let html = `통화: <b>${cur}</b>`;
     if (cid !== null) {
       let state = '<span style="color:#94a3b8">미확인</span>';
@@ -797,6 +1257,13 @@
           : (cidCache.bestCid === cid ? '<span style="color:#22c55e">저가 ✓</span>' : `<span style="color:#dc2626">고가 → ${cidCache.bestCid} 적용</span>`);
       }
       html += `<br>채널: cid <b>${cid}</b> ${state}`;
+    }
+    if (cidStatus.phase === 'scanning') {
+      html += `<br><span style="color:#2563eb">CID 검색: ${cidStatus.done}/${cidStatus.total} (${cidStatus.source === 'room-grid' ? '최신 API' : '호환 API'})</span>`;
+    } else if (cidStatus.phase === 'verifying') {
+      html += `<br><span style="color:#7c3aed">최저 후보 재검증: ${cidStatus.done}/${cidStatus.total}</span>`;
+    } else if (cidStatus.phase === 'error') {
+      html += `<br><span style="color:#dc2626">CID 검색 실패 (${cidStatus.done}/${cidStatus.total})</span>`;
     }
     if (hotelCur && cur && cur !== hotelCur) {
       html += ` <span style="color:#dc2626">⚠ 현지통화 ${hotelCur} 아님 → 5% 수수료 위험</span>`;
@@ -822,6 +1289,8 @@
       const t = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
       log.textContent = `[${t}] ${msg}\n` + log.textContent;
     }
+    const info = document.getElementById('nyx-agoda-info');
+    if (info) updatePanel(collectPrices(document));
   }
 
   function init() {
@@ -829,7 +1298,21 @@
     scan();
     const obs = new MutationObserver(() => scheduleScan());
     obs.observe(document.body, { childList: true, subtree: true });
-    setInterval(() => scheduleScan(), 3000);
+    const cidLocationKey = () => {
+      const c = urlCriteria();
+      return [location.pathname, c.checkIn, c.checkOut || c.los, c.rooms, c.adults, c.children, c.curr, currentCid() ?? ''].join('|');
+    };
+    let lastCidNavKey = cidLocationKey();
+    setInterval(() => {
+      scheduleScan();
+      const nextCidNavKey = cidLocationKey();
+      if (nextCidNavKey !== lastCidNavKey) {
+        lastCidNavKey = nextCidNavKey;
+        capturedLegacyTemplate = null;
+        capturedRoomGridTemplate = null;
+        setTimeout(() => ensureCheapCid(), 3000);
+      }
+    }, 3000);
     notify('로드됨 — 최저가 스캔 시작');
     if (settings.promoHunt && /payment|checkout|book/.test(location.pathname)) {
       setTimeout(() => { if (findPromoInput()) promoHunt(); }, 3000);
@@ -838,6 +1321,22 @@
       setTimeout(() => { ensureCheapCid(); }, 4000);
     }
   }
+
+  try {
+    Object.defineProperty(window, '__NYX_AGODA__', {
+      configurable: true,
+      value: Object.freeze({
+        version: '1.8.0',
+        getState: () => ({
+          criteria: probeContext(), status: Object.assign({}, cidStatus),
+          cache: getCidCache(), candidateCount: buildProbeList(probeContext()).length,
+          captured: { roomGrid: !!capturedRoomGridTemplate, secondary: !!capturedLegacyTemplate }
+        }),
+        rescanCid: () => ensureCheapCid({ force: true }),
+        clearCidCache: () => clearCidCache()
+      })
+    });
+  } catch (e) {}
 
   if (document.body) init();
   else document.addEventListener('DOMContentLoaded', init);

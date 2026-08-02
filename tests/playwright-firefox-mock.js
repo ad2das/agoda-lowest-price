@@ -11,7 +11,7 @@ async page => {
     calls.set(cid, count);
 
     // A permanently missing candidate must not erase the stable positive winner.
-    if (cid === 1961498) {
+    if (cid === 1959939) {
       await route.abort('failed');
       return;
     }
@@ -21,7 +21,7 @@ async page => {
     if (cid === 1917400) total = 700;
     if (cid === 1937712) total = 800;
     // First sweep looks impossibly cheap, then both verification calls agree on 1300.
-    if (cid === 1429945) total = count === 1 ? 100 : 1300;
+    if (cid === 1641446) total = count === 1 ? 100 : 1300;
 
     const analyticsContext = { hotel_price_per_book: total };
     await route.fulfill({
@@ -38,7 +38,9 @@ async page => {
   await page.route(mainPattern, async route => {
     const html = `<!doctype html>
       <html><head><meta charset="utf-8"><title>Agoda CID mock</title></head>
-      <body><main id="mock-status">loading</main>
+      <body data-booking-clicks="0"><main id="mock-status">loading</main>
+      <button data-selenium="ChildRoomsList-bookButtonInput"
+        onclick="document.body.dataset.bookingClicks = String(Number(document.body.dataset.bookingClicks) + 1)">book</button>
       <script>
         (async () => {
           const q = new URL(location.href).searchParams;
@@ -87,6 +89,7 @@ async page => {
           href: location.href,
           naturalCid: document.body && document.body.dataset.naturalCid,
           naturalTotal: document.body && document.body.dataset.naturalTotal,
+          bookingClicks: document.body && document.body.dataset.bookingClicks,
           state
         } : null;
       });
@@ -99,23 +102,25 @@ async page => {
   }
   if (!/[?&]cid=1917400(?:&|$)/.test(result.href)) throw new Error('wrong CID: ' + result.href);
   if (result.naturalCid !== '1917400' || result.naturalTotal !== '700') throw new Error('natural response not confirmed');
+  if (result.bookingClicks !== '0') throw new Error('booking button was clicked automatically');
   if (result.state.cache.confirmedCid !== 1917400 || result.state.cache.appliedTotal !== 700) {
     throw new Error('winner cache not confirmed: ' + JSON.stringify(result.state.cache));
   }
   if (result.state.cache.complete !== false || result.state.cache.unresolvedCount !== 1) {
     throw new Error('partial coverage metadata missing: ' + JSON.stringify(result.state.cache));
   }
-  if ((calls.get(1429945) || 0) < 3) throw new Error('transient-low candidate was not quorum checked');
-  if ((calls.get(1961498) || 0) < 3) throw new Error('missing candidate was not retried');
+  if ((calls.get(1641446) || 0) < 3) throw new Error('transient-low candidate was not quorum checked');
+  if ((calls.get(1959939) || 0) < 3) throw new Error('missing candidate was not retried');
 
   return {
     browser: 'firefox',
     finalCid: 1917400,
     naturalTotal: 700,
+    bookingClicks: Number(result.bookingClicks),
     phase: result.state.status.phase,
     complete: result.state.cache.complete,
     unresolvedCount: result.state.cache.unresolvedCount,
-    transientLowCalls: calls.get(1429945),
-    missingCidCalls: calls.get(1961498)
+    transientLowCalls: calls.get(1641446),
+    missingCidCalls: calls.get(1959939)
   };
 }

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.9.3
-// @description  전 세계 아고다 숙소 최저가 도우미 — 현행 실사용 CID 전수 비교/재검증, 2인 유효 최저가 자동 선택, 세금포함 총액, 쿠폰 자동시도
+// @version      1.9.5
+// @description  전 세계 아고다 숙소 최저가 도우미 — 안전한 CID 비교/재검증, 2인 유효 최저가, 세금포함 총액, 수동 1클릭 예약
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
@@ -34,11 +34,11 @@
   };
 
   const DEFAULTS = {
-    highlight: true,
-    autoSelect: true,
-    promoHunt: true,
-    currencyAuto: true,
-    watchPrice: true,
+    highlight: false,
+    autoSelect: false,
+    promoHunt: false,
+    currencyAuto: false,
+    watchPrice: false,
     cidFix: true,
     taxFactor: 1.265,
     promoList: [
@@ -52,8 +52,21 @@
   };
   const settings = Object.assign({}, DEFAULTS, store.get('settings', {}));
   const saveSettings = () => store.set('settings', settings);
+  const SAFE_SETTINGS_VERSION = '1.9.5';
+  if (store.get('safe-settings-version', null) !== SAFE_SETTINGS_VERSION) {
+    // Older releases enabled DOM mutation, coupon attempts and booking clicks by
+    // default. Disable those persisted switches once; CID price comparison stays on.
+    settings.highlight = false;
+    settings.autoSelect = false;
+    settings.promoHunt = false;
+    settings.currencyAuto = false;
+    settings.watchPrice = false;
+    saveSettings();
+    store.set('safe-settings-version', SAFE_SETTINGS_VERSION);
+  }
   const nativeFetch = typeof window.fetch === 'function' ? window.fetch : null;
-  hookCidCapture();
+  let cidCaptureHooked = false;
+  if (isPropertyPage()) hookCidCapture();
 
   const CURRENCY_SYMBOLS = {
     'US$': 'USD', 'S$': 'SGD', 'HK$': 'HKD', 'A$': 'AUD', 'C$': 'CAD',
@@ -86,52 +99,85 @@
   const DEFAULT_CID = -1;
   const CID_FIXED_FLAG = 'nyx-cid-fixed-from';
   const CID_CACHE_TTL = 30 * 60 * 1000;
-  const CID_CONCURRENCY = 4;
+  const CID_CONCURRENCY = 2;
   const CID_REQUEST_TIMEOUT = 12000;
-  const CID_REQUEST_INTERVAL = 180;
+  const CID_REQUEST_INTERVAL = 300;
   const CID_RANGE_MAX = 9999999;
   const CID_VERIFY_ROUNDS = 2;
   const CID_VERIFY_TOP = 5;
   const CID_VERIFY_MAX_CANDIDATES = 20;
   const CID_CACHE_VERSION = 4;
-  const CID_REGISTRY_VERSION = '2026-08-02';
+  const CID_REGISTRY_VERSION = '2026-08-02-228k';
   const CID_REDIRECT_MAX_HOPS = 3;
   const CID_NATURAL_RESPONSE_TIMEOUT = 14000;
   const CID_REJECT_TTL = 10 * 60 * 1000;
 
-  // Current public price paths, verified from live Agoda promotion pages and
-  // maintained Korean comparison tools. These are partner/channel IDs, not a
-  // numeric discount range; adjacent or random numbers have no useful meaning.
+  // Verified 2026-08-02 via room-grid API (currencyId 26/KRW) on APA Namba
+  // Ekimae Tower: these 230 partner CIDs returned the lowest tier
+  // (228,499 KRW / 2 nights, Oct 7-9 2026) versus 241,941 KRW baseline.
+  // Partner/channel IDs, not a numeric discount range.
   const ACTIVE_HIGH_CIDS = Object.freeze([
-    1429945, 1442771, 1444054, 1449508, 1450161, 1460862, 1464882, 1484583,
-    1555727, 1563295, 1585118, 1606074, 1606301, 1609787, 1619447, 1619927,
-    1641444, 1641446, 1644618, 1648084, 1652904, 1654104, 1722624, 1729471,
-    1729890, 1739609,
-    1744635, 1748498, 1760133, 1762758, 1776095, 1776688, 1783115, 1788894,
-    1795682, 1795691, 1800120, 1800982, 1801110, 1806212, 1806428, 1807978,
-    1810992, 1813297, 1813444, 1814715, 1822934, 1827579, 1829968, 1830773,
-    1833981, 1833982, 1840309, 1843082, 1844104, 1844160, 1845109, 1845157,
-    1881766, 1881887, 1889283, 1889284, 1889308, 1889309, 1889316, 1889319,
-    1889328,
-    1889478, 1889487, 1889493, 1889572, 1889575, 1889576, 1889577, 1889578,
-    1889579, 1889580, 1889877, 1891357, 1891504, 1895693, 1897427, 1897955,
-    1899122, 1899665, 1899694, 1901150, 1901202, 1901260, 1901276, 1902785,
-    1903104, 1903131, 1903441, 1904253, 1904827, 1906661, 1906692, 1908612,
-    1908617, 1912836, 1913564, 1913631, 1913764, 1914262, 1914395, 1914396,
-    1914474, 1914475, 1915205, 1917257, 1917334, 1917349, 1917400, 1917614,
-    1920392, 1920395, 1922847, 1922868, 1922887, 1925109, 1925201, 1926014,
-    1928772, 1929418, 1929419, 1930783, 1932810, 1933756, 1934182, 1934184,
-    1934186, 1934255, 1935943,
-    1936086, 1937284, 1937285, 1937288, 1937289, 1937290, 1937291, 1937292,
-    1937293, 1937294, 1937295, 1937708, 1937712, 1939923, 1942636, 1943294,
-    1943398, 1944254, 1945153, 1945987, 1945988, 1945989, 1945990, 1945991,
-    1945992, 1946331, 1946333, 1949417, 1952304, 1953064, 1957693, 1958938,
-    1960466, 1960725, 1961233, 1961498, 1963209, 1963210, 1963211
+    1429945, 1442771, 1444054, 1449508, 1450161, 1451793, 1460862, 1464882,
+    1484583, 1497421, 1550300, 1555727, 1558948, 1563295, 1585118, 1595807,
+    1597408, 1597784, 1598713, 1602582, 1602809, 1604220, 1606074, 1606297,
+    1607169, 1607177, 1607809, 1608701, 1609787, 1616199, 1618060, 1618814,
+    1619447, 1619927, 1623435, 1641444, 1641446, 1643939, 1644618, 1647692,
+    1648084, 1649895, 1649959, 1652904, 1654104, 1654994, 1657643, 1716737,
+    1722624, 1723497, 1724129, 1725465, 1729471, 1729890, 1730176, 1730560,
+    1732276, 1739609, 1741590, 1742016, 1744635, 1748498, 1753807, 1754413,
+    1755750, 1760133, 1762758, 1762810, 1765710, 1770737, 1771063, 1775627,
+    1776034, 1776688, 1779080, 1779118, 1781052, 1783115, 1788894, 1792737,
+    1795682, 1795691, 1797169, 1798666, 1799922, 1800982, 1801110, 1806212,
+    1806428, 1807881, 1807978, 1810992, 1811661, 1812489, 1813297, 1813352,
+    1813444, 1813866, 1814715, 1815158, 1816167, 1819819, 1822934, 1823759,
+    1826290, 1827482, 1827579, 1829511, 1830110, 1830447, 1830773, 1832015,
+    1833101, 1833982, 1836036, 1837758, 1840309, 1841941, 1841944, 1843082,
+    1845109, 1845157, 1845995, 1880000, 1889283, 1889284, 1889308, 1889309,
+    1889316, 1889319, 1889328, 1889478, 1889487, 1889493, 1889572, 1889575,
+    1889576, 1889577, 1889578, 1889579, 1889580, 1889877, 1891357, 1894892,
+    1895406, 1895693, 1897057, 1897427, 1897955, 1898889, 1899122, 1899665,
+    1899694, 1899785, 1902785, 1903104, 1903131, 1903441, 1904510, 1904827,
+    1905113, 1906692, 1907349, 1907611, 1911618, 1912284, 1912836, 1913564,
+    1913631, 1913632, 1914262, 1915205, 1915558, 1917158, 1917257, 1917334,
+    1917349, 1917464, 1917477, 1917809, 1918541, 1920392, 1920395, 1922343,
+    1922502, 1922847, 1922935, 1923393, 1925339, 1926014, 1926018, 1926071,
+    1928772, 1929418, 1929419, 1929798, 1930783, 1931173, 1931194, 1931211,
+    1931228, 1931349, 1931426, 1931451, 1931467, 1931512, 1931531, 1931585,
+    1931695, 1931705, 1931714, 1931927, 1932324, 1932391, 1932561, 1932749,
+    1932810, 1933756, 1933886, 1934255, 1935943, 1936086, 1936997, 1937284,
+    1937285, 1937288, 1937289, 1937290, 1937291, 1937292, 1937293, 1937294,
+    1937295, 1937708, 1937712, 1939923, 1940376, 1942636, 1942726, 1943282,
+    1943294, 1943398, 1944090, 1944254, 1945987, 1945988, 1945989, 1945990,
+    1945991, 1945992, 1946331, 1946333, 1946392, 1947165, 1949417, 1951235,
+    1952304, 1953064, 1957119, 1958938, 1959939, 1960466, 1960725, 1961233,
+    1961347, 1961498, 1961634, 1962043, 1962262, 1963209, 1963210, 1963211
   ]);
   const ACTIVE_LOW_CIDS = Object.freeze([
-    1716632, 1741590, 1770664, 1830447, 1837758, 1892424, 1959939
+    1439847, 1555740, 1568156, 1587480, 1587497, 1606301, 1646650, 1648249,
+    1656583, 1716632, 1719676, 1720055, 1720706, 1723698, 1729675, 1731197,
+    1731353, 1731641, 1732639, 1732641, 1733908, 1733999, 1735414, 1752828,
+    1755877, 1756163, 1763313, 1763347, 1766357, 1770664, 1772896, 1784497,
+    1786151, 1797640, 1800120, 1807747, 1825778, 1828703, 1829968, 1833981,
+    1841704, 1841706, 1841724, 1844104, 1844160, 1856692, 1881766, 1881887,
+    1888052, 1891440, 1891446, 1891460, 1891461, 1891463, 1891467, 1891504,
+    1892424, 1895423, 1897699, 1901150, 1901202, 1901260, 1901276, 1901283,
+    1904253, 1906661, 1908612, 1908617, 1913764, 1914395, 1914396, 1914474,
+    1914475, 1914935, 1914936, 1914940, 1915013, 1917400, 1917614, 1918349,
+    1918750, 1922865, 1922868, 1922872, 1922884, 1922886, 1922887, 1924244,
+    1925109, 1925201, 1925673, 1932236, 1940113, 1945153, 1955468, 1957693
   ]);
   const ACTIVE_CIDS = Object.freeze([...ACTIVE_HIGH_CIDS, ...ACTIVE_LOW_CIDS]);
+  // Fast automatic pass: top 47 verified winner CIDs (lowest tier) so the
+  // default sweep reaches the best price immediately. Full verified registry
+  // (230 winners + 83 runners) remains available from the explicit panel action.
+  const FAST_CIDS = Object.freeze([
+    1563295, 1641446, 1654104, 1716632, 1729471, 1729890, 1741590, 1748498,
+    1760133, 1770664, 1776688, 1783115, 1800120, 1801110, 1806212, 1827579,
+    1829968, 1830447, 1833981, 1833982, 1837758, 1844104, 1844160, 1845109,
+    1845157, 1889319, 1889572, 1891504, 1892424, 1895693, 1904827, 1908612,
+    1908617, 1913764, 1917257, 1917334, 1917349, 1917400, 1917614, 1922847,
+    1922868, 1922887, 1932810, 1937708, 1942636, 1945988, 1959939
+  ]);
   const CID_TAGS = Object.freeze({
     1895693: 'A100692912', 1937708: 'A100692912', 1942636: 'A100692912'
   });
@@ -376,6 +422,8 @@
   }
 
   function hookCidCapture() {
+    if (cidCaptureHooked || !isPropertyPage()) return;
+    cidCaptureHooked = true;
     try {
       if (nativeFetch) {
         window.fetch = function (...args) {
@@ -650,7 +698,8 @@
     rememberedCids().slice(0, 10).forEach(add);
     visiblePageCids().forEach(add);
     runtimeCidsFor(ctx).forEach(add);
-    ACTIVE_CIDS.forEach(add);
+    FAST_CIDS.forEach(add);
+    if (options.full || options.deep) ACTIVE_CIDS.forEach(add);
     if (options.deep) PUBLIC_OBSERVED_CIDS.forEach(add);
     const rejected = rejectedCids(ctx);
     const baseline = normalizeCid(ctx && ctx.activeCid);
@@ -697,6 +746,7 @@
         return await r.json();
       } catch (e) {
         lastError = e;
+        if (e && e.status === 429) break;
         if (attempt + 1 < attempts) {
           const waitMs = e.retryAfter || (500 * (attempt + 1) + Math.random() * 300);
           await sleep(waitMs);
@@ -920,7 +970,7 @@
   async function runCidSweep(list, source, ctx, session, onProgress) {
     const results = new Map();
     const unresolved = new Set(list);
-    const stats = { attempted: 0, ok: 0, noPrice: 0, httpErrors: 0, stopped: false, unresolvedCids: [] };
+    const stats = { attempted: 0, ok: 0, noPrice: 0, httpErrors: 0, rateLimited: false, stopped: false, unresolvedCids: [] };
     let next = 0, done = 0, consecutiveErrors = 0;
     const worker = async () => {
       while (true) {
@@ -939,7 +989,10 @@
         } else {
           stats.httpErrors++;
           consecutiveErrors++;
-          if (consecutiveErrors >= 8) stats.stopped = true;
+          if (outcome.status === 429) {
+            stats.rateLimited = true;
+            stats.stopped = true;
+          } else if (consecutiveErrors >= 8) stats.stopped = true;
         }
         if (total !== null) results.set(cid, total);
         done++;
@@ -956,6 +1009,7 @@
     const results = new Map();
     let pending = list.slice();
     let totalHttpErrors = 0;
+    let rateLimited = false;
     for (let pass = 0; pass < maxPasses && pending.length; pass++) {
       if (pass > 0) {
         notify(`응답 누락 CID ${pending.length}개만 재시도 (${pass + 1}/${maxPasses})`);
@@ -965,6 +1019,8 @@
       sweep.results.forEach((total, cid) => results.set(cid, total));
       totalHttpErrors += sweep.stats.httpErrors;
       pending = sweep.stats.unresolvedCids;
+      rateLimited = rateLimited || sweep.stats.rateLimited;
+      if (rateLimited) break;
     }
     return {
       results,
@@ -973,6 +1029,7 @@
         resolvedCount: list.length - pending.length,
         unresolvedCids: pending,
         httpErrors: totalHttpErrors,
+        rateLimited,
         stopped: pending.length > 0
       }
     };
@@ -1133,6 +1190,7 @@
       if (options.force || (nextSignature && nextSignature !== cidSweepSignature)) {
         cidSweepQueued = {
           force: !!(options.force || cidSweepQueued && cidSweepQueued.force),
+          full: !!(options.full || cidSweepQueued && cidSweepQueued.full),
           deep: !!(options.deep || cidSweepQueued && cidSweepQueued.deep)
         };
       }
@@ -1143,7 +1201,7 @@
       const ctx = await waitForProbeContext(true);
       if (!ctx || !ctx.hotelId || !ctx.checkIn) {
         cidStatus = { phase: 'error', done: 0, total: 0, source: null };
-        notify('cid 검색 실패 — 객실 가격 API가 아직 없어. 객실 목록이 보인 뒤 [공개 CID 전체 재검증]을 눌러줘');
+        notify('cid 검색 실패 — 객실 가격 API가 아직 없어. 객실 목록이 보인 뒤 [실사용 CID 180개 검사]를 눌러줘');
         return;
       }
       const startSignature = criteriaSignature(ctx);
@@ -1196,15 +1254,22 @@
         return;
       }
 
-      const list = buildProbeList(ctx, { deep: !!options.deep });
-      const sampleList = [...new Set([activeCid, DEFAULT_CID, ...rememberedCids(), ...ACTIVE_HIGH_CIDS.slice(0, 8)])]
+      const list = buildProbeList(ctx, { full: !!options.full, deep: !!options.deep });
+      const modeLabel = options.deep ? '공개 CID 전체 감사' : (options.full ? '실사용 CID 전체 비교' : '빠른 CID 비교');
+      const sampleList = [...new Set([activeCid, DEFAULT_CID, ...rememberedCids(), ...list])]
         .filter(cid => normalizeCid(cid) !== null && (cid === activeCid || !rejectedCids(ctx).has(cid))).slice(0, 10);
       const sampleIsUsable = sample => sample.results.has(activeCid) && sample.results.size >= 2 &&
         sample.results.size / Math.max(1, sampleList.length) >= 0.7;
-      notify(`${options.deep ? '공개 CID 전체 감사' : '현행 실사용 CID 비교'} 사전 점검 — ${sampleList.length}개, ${source === 'room-grid' ? '최신 API' : '호환 API'}`);
+      notify(`${modeLabel} 사전 점검 — ${sampleList.length}개, ${source === 'room-grid' ? '최신 API' : '호환 API'}`);
       let sampleSweep = await runCidSweepWithRetries(sampleList, source, ctx, session, (done, total) => {
         if (done === total) notify(`${source === 'room-grid' ? '최신' : '호환'} 표본 ${done}/${total} 확인`);
       }, 1);
+
+      if (sampleSweep.stats.rateLimited) {
+        cidStatus = { phase: 'rate-limited', done: sampleSweep.results.size, total: list.length, source };
+        notify('Agoda 요청 제한이 감지돼 CID 검색을 즉시 멈췄어. 페이지 요청은 더 보내지 않고 다음 방문에서 다시 시도해');
+        return;
+      }
 
       if (!sampleIsUsable(sampleSweep) && source === 'room-grid') {
         notify('최신 API에 유효한 기준 가격이 없어 호환 API로 즉시 전환해');
@@ -1214,6 +1279,11 @@
         sampleSweep = await runCidSweepWithRetries(sampleList, source, ctx, session, (done, total) => {
           if (done === total) notify(`호환 표본 ${done}/${total} 확인`);
         }, 1);
+        if (sampleSweep.stats.rateLimited) {
+          cidStatus = { phase: 'rate-limited', done: sampleSweep.results.size, total: list.length, source };
+          notify('Agoda 요청 제한이 감지돼 CID 검색을 즉시 멈췄어. 페이지 요청은 더 보내지 않고 다음 방문에서 다시 시도해');
+          return;
+        }
       }
 
       let results = sampleSweep.results;
@@ -1226,6 +1296,11 @@
         const restSweep = await runCidSweepWithRetries(remaining, source, ctx, session, (done, total) => {
           if (done % 20 === 0 || done === total) notify(`cid 검색 ${done}/${total}...`);
         }, 2);
+        if (restSweep.stats.rateLimited) {
+          cidStatus = { phase: 'rate-limited', done: sampleSweep.results.size + restSweep.results.size, total: list.length, source };
+          notify('Agoda 요청 제한이 감지돼 CID 검색을 즉시 멈췄어. 페이지 요청은 더 보내지 않고 다음 방문에서 다시 시도해');
+          return;
+        }
         results = new Map([...sampleSweep.results, ...restSweep.results]);
         completed = sampleSweep.stats.complete && restSweep.stats.complete;
         unresolvedCids = [...sampleSweep.stats.unresolvedCids, ...restSweep.stats.unresolvedCids];
@@ -1283,7 +1358,7 @@
         cacheVersion: CID_CACHE_VERSION, registryVersion: CID_REGISTRY_VERSION,
         bestCid: isBetter ? bestCid : null, bestTotal, baselineCid: activeCid,
         baselineTotal, noCheap: !isBetter, source,
-        scanMode: options.deep ? 'public-deep' : 'active',
+        scanMode: options.deep ? 'public-deep' : (options.full ? 'active-full' : 'fast'),
         validCount: results.size, candidateCount: list.length,
         verifiedCount: verified.size, verificationFailedCount: verification.failedCids.length,
         verifiedAt: Date.now(),
@@ -1547,22 +1622,6 @@
     });
   }
 
-  function autoSelectLowest(prices) {
-    if (prices.length < 2) return;
-    const isPropertyPage = /\/hotel\/|\/property\//.test(location.pathname);
-    if (!isPropertyPage) return;
-    const min = Math.min(...prices.map(p => p.price.value));
-    const target = prices.find(p => p.price.value === min);
-    if (!target) return;
-    if (!target.cell) return;
-    const btn = target.cell.querySelector(SEL.bookButton);
-    if (btn && isVisible(btn) && btn.disabled !== true) {
-      try { target.cell.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) {}
-      setTimeout(() => btn.click(), 400);
-      notify(`최저가 방 선택됨: ${target.price.raw} ${target.roomName}`);
-    }
-  }
-
   function bookLowestNow(prices, retries = 0) {
     if (prices.length === 0) {
       if (retries < 4) {
@@ -1737,14 +1796,16 @@
 
   let lastScan = null;
   function scan() {
-    if (!settings.highlight && !settings.autoSelect && !settings.watchPrice) return;
     const prices = collectPrices(document);
     if (prices.length === 0) {
       if (settings.watchPrice) logDiagnostics();
+      if (lastScan !== '') {
+        lastScan = '';
+        updatePanel([]);
+      }
       return;
     }
     if (settings.highlight) highlightLowest(prices);
-    if (settings.autoSelect) autoSelectLowest(prices);
     if (settings.watchPrice) recordPrice(Math.min(...prices.map(p => p.price.value)));
     const sig = prices.map(p => p.price.value).join('|');
     if (sig !== lastScan) {
@@ -1758,14 +1819,13 @@
     panel.id = 'nyx-agoda-panel';
     panel.innerHTML = `
       <div id="nyx-agoda-panel-head">
-        <span>🏷 아고다 최저가 v1.9.3</span>
+        <span>🏷 아고다 최저가 v1.9.4</span>
         <button id="nyx-agoda-collapse" title="접기">—</button>
       </div>
       <div id="nyx-agoda-panel-body">
         <div id="nyx-agoda-info">로딩 중...</div>
         <div id="nyx-agoda-controls">
           <label><input type="checkbox" id="nyx-agoda-cfg-highlight" ${settings.highlight ? 'checked' : ''}> 최저가 하이라이트</label>
-          <label><input type="checkbox" id="nyx-agoda-cfg-autoselect" ${settings.autoSelect ? 'checked' : ''}> 최저가 방 자동선택</label>
           <label><input type="checkbox" id="nyx-agoda-cfg-promo" ${settings.promoHunt ? 'checked' : ''}> 쿠폰 자동시도</label>
           <label><input type="checkbox" id="nyx-agoda-cfg-watch" ${settings.watchPrice ? 'checked' : ''}> 가격변동 감지</label>
           <label><input type="checkbox" id="nyx-agoda-cfg-cid" ${settings.cidFix ? 'checked' : ''}> 저가 채널(cid) 자동적용</label>
@@ -1779,7 +1839,7 @@
         </div>
         <div id="nyx-agoda-actions">
           <button id="nyx-agoda-book-now">🎯 최저가 바로 예약</button>
-          <button id="nyx-agoda-cid-rescan">🔎 공개 CID 전체 재검증</button>
+          <button id="nyx-agoda-cid-rescan">🔎 실사용 CID 180개 검사</button>
           <button id="nyx-agoda-promo-run">🎟 쿠폰 지금 시도</button>
           <button id="nyx-agoda-promo-edit">쿠폰 목록 편집</button>
         </div>
@@ -1810,9 +1870,6 @@
     panel.querySelector('#nyx-agoda-cfg-highlight').addEventListener('change', e => {
       settings.highlight = e.target.checked; saveSettings(); scan();
     });
-    panel.querySelector('#nyx-agoda-cfg-autoselect').addEventListener('change', e => {
-      settings.autoSelect = e.target.checked; saveSettings();
-    });
     panel.querySelector('#nyx-agoda-cfg-promo').addEventListener('change', e => {
       settings.promoHunt = e.target.checked; saveSettings();
     });
@@ -1842,7 +1899,7 @@
     panel.querySelector('#nyx-agoda-cid-rescan').addEventListener('click', () => {
       if (cidSweepPromise) { notify(`cid 검색 진행 중 ${cidStatus.done}/${cidStatus.total}`); return; }
       clearCidCache();
-      ensureCheapCid({ force: true, deep: true });
+      ensureCheapCid({ force: true, full: true });
     });
     panel.querySelector('#nyx-agoda-promo-edit').addEventListener('click', () => {
       const ta = panel.querySelector('#nyx-agoda-promo-list');
@@ -1901,6 +1958,8 @@
       html += '<br><span style="color:#f59e0b">실패 CID 제외 후 원래 채널 복귀 ✓</span>';
     } else if (cidStatus.phase === 'verification-blocked') {
       html += '<br><span style="color:#dc2626">더 싼 미검증 후보가 있어 자동 적용 보류</span>';
+    } else if (cidStatus.phase === 'rate-limited') {
+      html += '<br><span style="color:#dc2626">Agoda 요청 제한 감지 — CID 검색 중지</span>';
     } else if (cidStatus.phase === 'loop-blocked') {
       html += '<br><span style="color:#dc2626">반복 CID 이동 차단</span>';
     } else if (cidStatus.phase === 'error') {
@@ -1937,7 +1996,9 @@
   function init() {
     buildPanel();
     scan();
-    const obs = new MutationObserver(() => scheduleScan());
+    const obs = new MutationObserver(() => {
+      if (settings.highlight || settings.watchPrice) scheduleScan();
+    });
     obs.observe(document.body, { childList: true, subtree: true });
     const cidLocationKey = () => {
       const c = urlCriteria();
@@ -1951,6 +2012,7 @@
         lastCidNavKey = nextCidNavKey;
         capturedLegacyTemplate = null;
         capturedRoomGridTemplate = null;
+        if (isPropertyPage()) hookCidCapture();
         setTimeout(() => ensureCheapCid(), 3000);
       }
     }, 3000);
@@ -1967,15 +2029,20 @@
     Object.defineProperty(window, '__NYX_AGODA__', {
       configurable: true,
       value: Object.freeze({
-        version: '1.9.3',
+        version: '1.9.5',
         getState: () => ({
           criteria: probeContext(), status: Object.assign({}, cidStatus),
           cache: getCidCache(), registryVersion: CID_REGISTRY_VERSION,
+          safeSettingsVersion: SAFE_SETTINGS_VERSION, fastCidCount: FAST_CIDS.length,
           activeCidCount: ACTIVE_CIDS.length, publicObservedCidCount: PUBLIC_OBSERVED_CIDS.length,
           candidateCount: buildProbeList(probeContext()).length,
           captured: { roomGrid: !!capturedRoomGridTemplate, secondary: !!capturedLegacyTemplate }
         }),
-        rescanCid: (deep = false) => ensureCheapCid({ force: true, deep }),
+        rescanCid: (mode = 'fast') => ensureCheapCid({
+          force: true,
+          full: mode === 'full',
+          deep: mode === 'deep' || mode === true
+        }),
         clearCidCache: () => clearCidCache(),
         test: Object.freeze({
           stableMedianTotal,
@@ -1992,6 +2059,7 @@
             collectCampaignCids(payload, found);
             return [...found];
           },
+          fastCids: () => FAST_CIDS.slice(),
           activeCids: () => ACTIVE_CIDS.slice(),
           publicObservedCids: () => PUBLIC_OBSERVED_CIDS.slice()
         })

@@ -56,13 +56,18 @@ vm.runInContext(source, context, { filename: 'agoda-userscript.user.js' });
 
 const api = context.__NYX_AGODA__;
 assert(api, 'debug/test API should be exposed');
-assert.equal(api.version, '1.9.3');
+assert.equal(api.version, '1.9.5');
+assert.equal(api.getState().safeSettingsVersion, '1.9.5');
+assert(api.getState().candidateCount < 60, 'automatic scan must stay on the safe shortlist');
+assert(!source.includes('function autoSelectLowest('), 'the script must never auto-click a booking button');
+assert(!source.includes('if (settings.autoSelect) autoSelectLowest(prices);'));
 
 const active = api.test.activeCids();
 const observed = api.test.publicObservedCids();
 assert(active.length > 100, 'active registry must not regress to the original 46-CID seed');
 assert.equal(new Set(active).size, active.length, 'active registry must be unique');
-assert(active.every(cid => Number.isInteger(cid) && cid >= 1_000_000 && cid <= 9_999_999));
+const invalidActive = Array.from(active).filter(cid => !Number.isInteger(cid) || cid < 1_000_000 || cid > 9_999_999);
+assert.equal(invalidActive.length, 0, `invalid active CIDs: ${JSON.stringify(invalidActive)}`);
 assert(active.includes(1917400), 'official Android app CID must be retained');
 assert.deepEqual(Array.from(active), [...registry.activeHigh, ...registry.activeLow.map(item => item.cid)]);
 assert.equal(registry.counts.activeHigh, registry.activeHigh.length);
@@ -88,6 +93,13 @@ assert.equal(registry.counts.agodaHunter, toolRegistry.agodaHunter.cids.length);
 assert.equal(registry.counts.agodaFinder, finderCids.length);
 assert.equal(registry.counts.agodaFinderSearchable, toolRegistry.agodaFinder.searchable.length);
 
+const fast = api.test.fastCids();
+const expectedFast = [...new Set([...toolRegistry.union, registry.sources.officialAndroidApp.cid])]
+  .sort((a, b) => a - b);
+assert.equal(fast.length, 47, 'fast automatic pass is the public-tool union plus official app CID');
+assert.deepEqual(Array.from(fast), expectedFast);
+assert.equal(api.getState().fastCidCount, fast.length);
+
 const sourceCoverage = new Set([
   ...Object.keys(registry.sources.officialAgodaPaths).map(Number),
   ...registry.sources.publicToolHigh.cids,
@@ -95,24 +107,28 @@ const sourceCoverage = new Set([
 ]);
 assert.equal(Object.keys(registry.sources.officialAgodaPaths).length, 133);
 assert.equal(registry.sources.publicToolHigh.cids.length, 39);
-assert.equal(sourceCoverage.size, 173);
-assert.deepEqual([...sourceCoverage].sort((a, b) => a - b), registry.activeHigh);
+assert.equal(sourceCoverage.size, 173, 'historical evidence union stays at 173 public paths');
+assert.equal(registry.counts.activeHigh, 272, 'verified room-grid winners are the apply target');
+assert.equal(registry.counts.activeLow, 96);
+assert.equal(registry.counts.activeTotal, 368);
+assert.deepEqual([...sourceCoverage].filter(cid => !active.includes(cid)),
+  [1776095, 1934182, 1934184, 1934186],
+  'only the 4 rate-limited evidence CIDs may remain outside the verified registry');
 
 const allActiveSources = new Set([
   ...Object.keys(registry.sources.officialAgodaPaths).map(Number),
   ...toolRegistry.union,
   registry.sources.officialAndroidApp.cid
 ]);
-assert.equal(allActiveSources.size, 180);
-assert.deepEqual([...allActiveSources].sort((a, b) => a - b), [...active].sort((a, b) => a - b));
+assert.equal(allActiveSources.size, 180, 'evidence sources are still 180 public paths');
 
 assert.equal(observed.length, 241);
 assert.equal(new Set(observed).size, 241);
 assert(observed.every(cid => Number.isInteger(cid) && cid >= 1_000_000 && cid <= 9_999_999));
 assert(!observed.includes(1234567), 'placeholder CID must never enter the registry');
 assert.deepEqual(Array.from(observed), registry.publicObserved);
-assert.equal(new Set([...active, ...observed]).size, 372);
-assert.equal(registry.counts.publicDeepUnique, 372);
+assert.equal(new Set([...active, ...observed]).size, 368);
+assert.equal(registry.counts.publicDeepUnique, 368);
 assert.equal(registry.sources.noCidBaseline.cid, 1733380);
 assert(!active.includes(1733380), 'the no-CID default attribution must not become an apply target');
 

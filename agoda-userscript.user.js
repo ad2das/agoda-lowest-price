@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.9.0
+// @version      1.9.1
 // @description  전 세계 아고다 숙소 최저가 도우미 — 현행 실사용 CID 전수 비교/재검증, 2인 유효 최저가 자동 선택, 세금포함 총액, 쿠폰 자동시도
 // @author       Nyx
 // @match        https://www.agoda.com/*
@@ -1757,7 +1757,7 @@
     panel.id = 'nyx-agoda-panel';
     panel.innerHTML = `
       <div id="nyx-agoda-panel-head">
-        <span>🏷 아고다 최저가</span>
+        <span>🏷 아고다 최저가 v1.9.1</span>
         <button id="nyx-agoda-collapse" title="접기">—</button>
       </div>
       <div id="nyx-agoda-panel-body">
@@ -1966,7 +1966,7 @@
     Object.defineProperty(window, '__NYX_AGODA__', {
       configurable: true,
       value: Object.freeze({
-        version: '1.9.0',
+        version: '1.9.1',
         getState: () => ({
           criteria: probeContext(), status: Object.assign({}, cidStatus),
           cache: getCidCache(), registryVersion: CID_REGISTRY_VERSION,

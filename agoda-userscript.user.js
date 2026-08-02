@@ -1,12 +1,15 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.9.6
+// @version      1.9.7
 // @description  전 세계 아고다 숙소 최저가 도우미 — 안전한 CID 비교/재검증, 2인 유효 최저가, 세금포함 총액, 수동 1클릭 예약
 // @author       Nyx
 // @match        https://www.agoda.com/*
 // @match        https://agoda.com/*
 // @match        https://m.agoda.com/*
+// @exclude      https://www.agoda.com/*/search*
+// @exclude      https://agoda.com/*/search*
+// @exclude      https://m.agoda.com/*/search*
 // @updateURL    https://raw.githubusercontent.com/ad2das/agoda-lowest-price/main/agoda-userscript.user.js
 // @downloadURL  https://raw.githubusercontent.com/ad2das/agoda-lowest-price/main/agoda-userscript.user.js
 // @homepageURL  https://github.com/ad2das/agoda-lowest-price
@@ -1819,7 +1822,7 @@
     panel.id = 'nyx-agoda-panel';
     panel.innerHTML = `
       <div id="nyx-agoda-panel-head">
-        <span>🏷 아고다 최저가 v1.9.6</span>
+        <span>🏷 아고다 최저가 v1.9.7</span>
         <button id="nyx-agoda-collapse" title="접기">—</button>
       </div>
       <div id="nyx-agoda-panel-body">
@@ -2006,6 +2009,12 @@
     };
     let lastCidNavKey = cidLocationKey();
     setInterval(() => {
+      const panel = document.getElementById('nyx-agoda-panel');
+      if (!isPropertyPage()) {
+        if (panel) panel.style.display = 'none';
+        return;
+      }
+      if (panel) panel.style.display = '';
       scheduleScan();
       const nextCidNavKey = cidLocationKey();
       if (nextCidNavKey !== lastCidNavKey) {
@@ -2029,7 +2038,7 @@
     Object.defineProperty(window, '__NYX_AGODA__', {
       configurable: true,
       value: Object.freeze({
-        version: '1.9.6',
+        version: '1.9.7',
         getState: () => ({
           criteria: probeContext(), status: Object.assign({}, cidStatus),
           cache: getCidCache(), registryVersion: CID_REGISTRY_VERSION,
@@ -2067,6 +2076,30 @@
     });
   } catch (e) {}
 
-  if (document.body) init();
-  else document.addEventListener('DOMContentLoaded', init);
+  let initialized = false;
+  let propertyBootScheduled = false;
+  function bootOnPropertyPage() {
+    if (initialized || propertyBootScheduled || !isPropertyPage()) return;
+    propertyBootScheduled = true;
+    hookCidCapture();
+    const finishBoot = () => setTimeout(() => {
+      propertyBootScheduled = false;
+      if (initialized || !isPropertyPage() || !document.body) return;
+      initialized = true;
+      init();
+    }, 1500);
+    if (document.readyState === 'complete') finishBoot();
+    else window.addEventListener('load', finishBoot, { once: true });
+  }
+
+  function startPropertyWatcher() {
+    bootOnPropertyPage();
+    const timer = setInterval(() => {
+      bootOnPropertyPage();
+      if (initialized) clearInterval(timer);
+    }, 250);
+  }
+
+  if (document.body) startPropertyWatcher();
+  else document.addEventListener('DOMContentLoaded', startPropertyWatcher, { once: true });
 })();

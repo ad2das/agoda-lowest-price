@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Agoda Always Lowest Price (아고다 최저가 도우미)
 // @namespace    nyx.agoda.lowest
-// @version      1.9.9
+// @version      1.10.0
 // @description  전 세계 아고다 숙소 최저가 도우미 — 안전한 CID 비교/재검증, 2인 유효 최저가, 세금포함 총액, 수동 1클릭 예약
 // @author       Nyx
 // @match        https://www.agoda.com/*
@@ -89,7 +89,7 @@
   };
   const settings = Object.assign({}, DEFAULTS, store.get('settings', {}));
   const saveSettings = () => store.set('settings', settings);
-  const SAFE_SETTINGS_VERSION = '1.9.9';
+  const SAFE_SETTINGS_VERSION = '1.10.0';
   if (store.get('safe-settings-version', null) !== SAFE_SETTINGS_VERSION) {
     // Older releases enabled DOM mutation, coupon attempts and booking clicks by
     // default. Disable those persisted switches once; CID price comparison stays on.
@@ -1913,7 +1913,7 @@
     panel.id = 'nyx-agoda-panel';
     panel.innerHTML = `
       <div id="nyx-agoda-panel-head">
-        <span>🏷 아고다 최저가 v1.9.9</span>
+        <span>🏷 아고다 최저가 v1.10.0</span>
         <button id="nyx-agoda-collapse" title="접기">—</button>
       </div>
       <div id="nyx-agoda-panel-body">
@@ -2142,7 +2142,7 @@
     Object.defineProperty(window, '__NYX_AGODA__', {
       configurable: true,
       value: Object.freeze({
-        version: '1.9.9',
+        version: '1.10.0',
         getState: () => ({
           criteria: probeContext(), status: Object.assign({}, cidStatus),
           cache: getCidCache(), registryVersion: CID_REGISTRY_VERSION,

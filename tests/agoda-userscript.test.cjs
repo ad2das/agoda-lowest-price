@@ -56,8 +56,8 @@ vm.runInContext(source, context, { filename: 'agoda-userscript.user.js' });
 
 const api = context.__NYX_AGODA__;
 assert(api, 'debug/test API should be exposed');
-assert.equal(api.version, '1.9.9');
-assert.equal(api.getState().safeSettingsVersion, '1.9.9');
+assert.equal(api.version, '1.10.0');
+assert.equal(api.getState().safeSettingsVersion, '1.10.0');
 assert(api.getState().campaignCount >= 16, 'resolved campaign redeem links must be embedded');
 assert(api.getState().promoListCount >= 30, 'scraped promo codes must be embedded');
 assert(!source.includes('// @exclude      https://www.agoda.com/*/search*'), 'SPA hotel navigation must keep the script alive');

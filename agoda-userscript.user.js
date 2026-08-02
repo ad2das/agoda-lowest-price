@@ -1776,8 +1776,15 @@
         return;
       }
       if (force) sessionStorage.removeItem(REDEEM_DONE_KEY);
+      // One coupon per site_id per session — first redeem of a site wins.
+      const seenSites = new Set();
+      const targets = CAMPAIGNS.filter(c => {
+        if (seenSites.has(c.siteId)) return false;
+        seenSites.add(c.siteId);
+        return true;
+      });
       let ok = 0;
-      for (const c of CAMPAIGNS) {
+      for (const c of targets) {
         try {
           const r = await fetch('/promotion/redeem?cinfo=' + c.cinfo, {
             method: 'GET', credentials: 'include',
@@ -1789,7 +1796,7 @@
       }
       sessionStorage.setItem(REDEEM_DONE_KEY, '1');
       const wallet = await scanWallet();
-      notify(`캠페인 활성화 시도 ${ok}/${CAMPAIGNS.length}개 — 지갑 쿠폰 ${wallet.length}개`);
+      notify(`캠페인 활성화 시도 ${ok}/${targets.length}개 (site_id 중복 제외) — 지갑 쿠폰 ${wallet.length}개`);
       if (wallet.length > 0) {
         for (const w of wallet.slice(0, 5)) {
           const t = [w.code, w.campaignName, w.displayValue, w.discountType && w.discountValue !== undefined ? `${w.discountType}/${w.discountValue}` : null]
